@@ -1,0 +1,7 @@
+<meta>
+    <script src="sourceG.lua" type="shared" />
+    <script src="sourceS.lua" type="server" />
+    <script src="sourceC.lua" type="client" />
+    <file src="files/BebasNeueRegular.otf" />
+    <download_priority_group>-110</download_priority_group>
+</meta>
