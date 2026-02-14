@@ -1,4 +1,8 @@
 -- sDrugRework/sourceC.lua
+addEventHandler("onClientResourceStart", resourceRoot, function()
+    triggerServerEvent("sDrugRework:clientReady", resourceRoot)
+end)
+
 
 local placing = false
 local placingData = nil
@@ -16,6 +20,13 @@ local MORTAR_INPUT_ITEMS = {
     { id = 432, name = "Parazen Flower" },
 }
 
+-- input itemId -> output itemId (+ optional ratio)
+local MORTAR_RECIPES = {
+    [14]  = { out = 182, ratio = 1, name = "Coca Paste" },
+    [15]  = { out = 183, ratio = 1, name = "Poppy Resin" },
+    [432] = { out = 184, ratio = 1, name = "Parazen Extract" },
+}
+
 local mortarUI = {
     window = false,
     inputSlot = false,
@@ -28,6 +39,33 @@ local mortarUI = {
     selectedInputName = false,
     menuInner = false,
     menuBorder = false,   -- optional rename, but we’ll keep compatibility
+    inputIcon = false,
+    inputIconPath = false,
+    inputQty = 1,
+    inputQtyText = false,
+    qtyPlusBtn = false,
+    qtyMinusBtn = false,
+    outputIcon = false,
+    outputQtyText = false,
+    outputItemId = false,
+    outputQty = 0,
+    tipLabel = false,
+}
+
+-- =========================================================
+-- Mortar minigame (client)
+-- =========================================================
+
+local MORTAR_MINIGAME = {
+    fillPerClick = 0.08,  -- CONFIG: how much one click fills (0..1)
+}
+
+local mortarGame = {
+    active = false,
+    progress = 0,
+    outId = false,
+    outQty = 0,
+    sound = false,
 }
 
 local function mortar_makeFaIcon(name, size)
@@ -44,8 +82,252 @@ local function mortar_makeFaIcon(name, size)
     return false
 end
 
+local function mortar_itemPicPath(itemId)
+    if not exports.sItems or not exports.sItems.getItemPic then
+        return false
+    end
+
+    local rel = exports.sItems:getItemPic(tonumber(itemId))
+    if not rel or rel == "" then
+        return false
+    end
+
+    -- If it’s already resource-qualified, keep it
+    if type(rel) == "string" and rel:sub(1, 1) == ":" then
+        return rel
+    end
+
+    -- sItems returns "files/items/..", but dxDrawImage needs ":resource/..." to access other resources
+    return ":sItems/" .. rel
+end
+
 local function mortar_isValid(el)
     return tonumber(el) and exports.sGui:isGuiElementValid(el)
+end
+
+local function mortarGame_startSound()
+    if isElement(mortarGame.sound) then return end
+
+    -- resource-relative path
+    mortarGame.sound = playSound("files/mortarandpestle.mp3", true) -- true = loop
+end
+
+local function mortarGame_stopSound()
+    if isElement(mortarGame.sound) then
+        stopSound(mortarGame.sound)
+    end
+    mortarGame.sound = false
+end
+
+local function mortarGame_stop(refund)
+    if not mortarGame.active then return end
+
+    mortarGame_stopSound()
+
+    mortarGame.active = false
+    mortarGame.progress = 0
+
+    removeEventHandler("onClientRender", root, mortarGame_render)
+    removeEventHandler("onClientClick", root, mortarGame_click)
+    unbindKey("backspace", "down", mortarGame_cancelKey)
+    unbindKey("escape", "down", mortarGame_cancelKey)
+
+    showCursor(false)
+    setPedAnimation(localPlayer, false)
+
+    if refund then
+        triggerServerEvent("sDrugRework:cancelMortarGrind", resourceRoot)
+        exports.sGui:showInfobox("e", "Cancelled.")
+    end
+end
+
+function mortarGame_cancelKey()
+    mortarGame_stop(true)
+end
+
+function mortarGame_render()
+    if not mortarGame.active then return end
+
+    local sx, sy = guiGetScreenSize()
+
+    -- Bottom middle bar
+    local bw, bh = 420, 18
+    local bx = (sx - bw) / 2
+    local by = sy - 120
+
+    dxDrawRectangle(bx, by, bw, bh, tocolor(0, 0, 0, 160))
+    dxDrawRectangle(bx + 2, by + 2, (bw - 4) * math.min(1, mortarGame.progress), bh - 4, tocolor(255, 255, 255, 200))
+
+    -- Above head bar
+    local px, py, pz = getElementPosition(localPlayer)
+    local wx, wy, wz = px, py, pz + 1.05
+    local sx2, sy2 = getScreenFromWorldPosition(wx, wy, wz)
+    if sx2 and sy2 then
+        local hw, hh = 120, 10
+        local hx, hy = sx2 - hw/2, sy2 - 40
+
+        dxDrawRectangle(hx, hy, hw, hh, tocolor(0, 0, 0, 160))
+        dxDrawRectangle(hx + 2, hy + 2, (hw - 4) * math.min(1, mortarGame.progress), hh - 4, tocolor(255, 255, 255, 200))
+    end
+end
+
+function mortarGame_click(button, state)
+    if not mortarGame.active then return end
+    if button ~= "left" or state ~= "down" then return end
+
+    mortarGame.progress = mortarGame.progress + (MORTAR_MINIGAME.fillPerClick or 0.08)
+
+    if mortarGame.progress >= 1 then
+        mortarGame.progress = 1
+
+        -- Success
+        exports.sGui:showInfobox("s", "Success!")
+        triggerServerEvent("sDrugRework:finishMortarGrind", resourceRoot)
+
+        mortarGame_stop(false)
+    end
+end
+
+local function mortar_isCursorInGuiEl(el)
+    if not mortar_isValid(el) or not isCursorShowing() then return false end
+
+    local cx, cy = getCursorPosition()
+    if not cx or not cy then return false end
+
+    local sx, sy = guiGetScreenSize()
+    local mx, my = cx * sx, cy * sy
+
+    -- Real (absolute) position for hit-test
+    local ex, ey = exports.sGui:getGuiRealPosition(el)
+    local ew, eh = exports.sGui:getGuiSize(el)
+
+    return (mx >= ex and mx <= ex + ew and my >= ey and my <= ey + eh)
+end
+
+local function mortar_tipDestroy()
+    if mortar_isValid(mortarUI.tipLabel) then
+        exports.sGui:deleteGuiElement(mortarUI.tipLabel)
+    end
+    mortarUI.tipLabel = false
+end
+
+local function mortar_tipShow(text)
+    if not text or text == "" or not isCursorShowing() then
+        mortar_tipDestroy()
+        return
+    end
+
+    local cx, cy = getCursorPosition()
+    if not cx or not cy then
+        mortar_tipDestroy()
+        return
+    end
+
+    local sx, sy = guiGetScreenSize()
+    local x = math.floor(cx * sx + 16)
+    local y = math.floor(cy * sy + 18)
+
+    -- Size the label to the text (so it doesn't clip)
+    local font = "default-bold"
+    local scale = 1
+    local w = math.floor(dxGetTextWidth(text, scale, font)) + 6
+    local h = 18
+
+    -- Clamp on screen
+    if x + w > sx - 5 then x = sx - w - 5 end
+    if y + h > sy - 5 then y = sy - h - 5 end
+    if x < 5 then x = 5 end
+    if y < 5 then y = 5 end
+
+    if not mortar_isValid(mortarUI.tipLabel) then
+        mortarUI.tipLabel = exports.sGui:createGuiElement("label", x, y, w, h, nil, true)
+        exports.sGui:setLabelAlignment(mortarUI.tipLabel, "left", "top")
+        exports.sGui:setLabelShadow(mortarUI.tipLabel, tocolor(0, 0, 0, 200), 1, 1) -- shadow support in sGui :contentReference[oaicite:1]{index=1}
+        exports.sGui:setLabelColor(mortarUI.tipLabel, tocolor(255, 255, 255, 255))
+    else
+        exports.sGui:setGuiPosition(mortarUI.tipLabel, x, y, true) -- absolute positioning supported :contentReference[oaicite:2]{index=2}
+        exports.sGui:setGuiSize(mortarUI.tipLabel, w, h)           -- supported :contentReference[oaicite:3]{index=3}
+    end
+
+    exports.sGui:setLabelText(mortarUI.tipLabel, text)
+end
+
+local function mortar_clearOutputUi()
+    if mortar_isValid(mortarUI.outputIcon) then exports.sGui:deleteGuiElement(mortarUI.outputIcon) end
+    if mortar_isValid(mortarUI.outputQtyText) then exports.sGui:deleteGuiElement(mortarUI.outputQtyText) end
+
+    mortarUI.outputIcon = false
+    mortarUI.outputQtyText = false
+    mortarUI.outputItemId = false
+    mortarUI.outputQty = 0
+end
+
+local function mortar_calcOutput()
+    mortarUI.outputItemId = false
+    mortarUI.outputQty = 0
+
+    local inId = tonumber(mortarUI.selectedInputId)
+    if not inId then return end
+
+    local r = MORTAR_RECIPES[inId]
+    if not r or not r.out then return end
+
+    local ratio = tonumber(r.ratio) or 1
+    local q = tonumber(mortarUI.inputQty) or 1
+    if q < 1 then q = 1 end
+
+    mortarUI.outputItemId = tonumber(r.out)
+    mortarUI.outputQty = math.max(1, math.floor(q * ratio))
+end
+
+local function mortar_refreshOutputUi()
+    mortar_calcOutput()
+
+    -- If no valid output, clear preview
+    if not mortarUI.outputItemId or mortarUI.outputQty <= 0 then
+        mortar_clearOutputUi()
+        return
+    end
+
+    local pic = mortar_itemPicPath(mortarUI.outputItemId)
+    if not pic then
+        mortar_clearOutputUi()
+        return
+    end
+
+    -- Position inside output slot (same way as input icon)
+    local rx, ry = exports.sGui:getGuiPosition(mortarUI.outputSlot)
+    local sw, sh = exports.sGui:getGuiSize(mortarUI.outputSlot)
+
+    local iconPad = 4
+    local iconSize = sh - iconPad*2 -- fits slot height
+
+    -- Create / update icon
+    if not mortar_isValid(mortarUI.outputIcon) then
+        mortarUI.outputIcon = exports.sGui:createGuiElement(
+            "image",
+            rx + iconPad, ry + iconPad,
+            iconSize, iconSize,
+            mortarUI.window
+        )
+    end
+    exports.sGui:setImageFile(mortarUI.outputIcon, pic)
+
+    -- Qty label to the right of the icon, vertically centered
+    local qtyX = rx + iconPad + iconSize + 6
+    local qtyW = sw - (qtyX - rx) - iconPad
+
+    if not mortar_isValid(mortarUI.outputQtyText) then
+        mortarUI.outputQtyText = exports.sGui:createGuiElement(
+            "label",
+            qtyX, ry,
+            qtyW, sh,
+            mortarUI.window
+        )
+        exports.sGui:setLabelAlignment(mortarUI.outputQtyText, "left", "center")
+    end
+
+    exports.sGui:setLabelText(mortarUI.outputQtyText, "x" .. tostring(mortarUI.outputQty))
 end
 
 -- Helper: apply SkyRPG color scheme correctly
@@ -61,6 +343,103 @@ local function mortar_setPanelStyle(el)
     end
 end
 
+local function mortar_setQty(q)
+    q = tonumber(q) or 1
+    if q < 1 then q = 1 end
+    mortarUI.inputQty = q
+
+    if mortar_isValid(mortarUI.inputQtyText) then
+        exports.sGui:setLabelText(mortarUI.inputQtyText, tostring(mortarUI.inputQty))
+    end
+    mortar_refreshOutputUi()
+end
+
+local function mortar_clearQtyUi()
+    if mortar_isValid(mortarUI.inputQtyText) then exports.sGui:deleteGuiElement(mortarUI.inputQtyText) end
+    if mortar_isValid(mortarUI.qtyPlusBtn) then exports.sGui:deleteGuiElement(mortarUI.qtyPlusBtn) end
+    if mortar_isValid(mortarUI.qtyMinusBtn) then exports.sGui:deleteGuiElement(mortarUI.qtyMinusBtn) end
+
+    mortarUI.inputQtyText = false
+    mortarUI.qtyPlusBtn = false
+    mortarUI.qtyMinusBtn = false
+end
+
+local function mortar_buildQtyUi()
+    -- Only show when an input item is selected (i.e. icon exists)
+    if not mortar_isValid(mortarUI.inputIcon) then
+        mortar_clearQtyUi()
+        return
+    end
+
+    local ix, iy = exports.sGui:getGuiPosition(mortarUI.inputIcon)
+    local iw, ih = exports.sGui:getGuiSize(mortarUI.inputIcon)
+
+    -- +/- button size
+    local b = 18
+
+    -- Minus (top-left)
+    if not mortar_isValid(mortarUI.qtyMinusBtn) then
+        mortarUI.qtyMinusBtn = exports.sGui:createGuiElement("button", ix - 2, iy - 2, b, b, mortarUI.window)
+        exports.sGui:setButtonText(mortarUI.qtyMinusBtn, "-")
+        exports.sGui:setGuiBackground(mortarUI.qtyMinusBtn, "solid", "sightgrey2")
+        exports.sGui:setGuiHover(mortarUI.qtyMinusBtn, "solid", "sightgrey1")
+    end
+
+    -- Plus (top-right)
+    if not mortar_isValid(mortarUI.qtyPlusBtn) then
+        mortarUI.qtyPlusBtn = exports.sGui:createGuiElement("button", ix + iw - b + 2, iy - 2, b, b, mortarUI.window)
+        exports.sGui:setButtonText(mortarUI.qtyPlusBtn, "+")
+        exports.sGui:setGuiBackground(mortarUI.qtyPlusBtn, "solid", "sightgrey2")
+        exports.sGui:setGuiHover(mortarUI.qtyPlusBtn, "solid", "sightgrey1")
+    end
+
+    -- Count label (bottom-right)
+    if not mortar_isValid(mortarUI.inputQtyText) then
+        mortarUI.inputQtyText = exports.sGui:createGuiElement("label", ix + iw - 26, iy + ih - 20, 24, 18, mortarUI.window)
+        exports.sGui:setLabelAlignment(mortarUI.inputQtyText, "right", "center")
+        exports.sGui:setGuiBackground(mortarUI.inputQtyText, "solid", "sightgrey3")
+    end
+
+    mortar_setQty(mortarUI.inputQty or 1)
+end
+
+local function mortar_setInputIcon(itemId)
+    -- remove icon
+    if not itemId then
+        if mortar_isValid(mortarUI.inputIcon) then
+            exports.sGui:deleteGuiElement(mortarUI.inputIcon)
+        end
+        mortarUI.inputIcon = false
+        mortar_clearQtyUi()
+        mortar_setQty(1)
+        return
+    end
+
+    local pic = mortar_itemPicPath(itemId)
+    if not pic then
+        exports.sGui:showInfobox("e", "No item picture found for ID: " .. tostring(itemId))
+        return
+    end
+
+    -- inputSlot is a child of the window, so we want RELATIVE coords to the window
+    local rx, ry = exports.sGui:getGuiPosition(mortarUI.inputSlot)
+    local iw, ih = exports.sGui:getGuiSize(mortarUI.inputSlot)
+
+    -- Create image element if missing
+    if not mortar_isValid(mortarUI.inputIcon) then
+        mortarUI.inputIcon = exports.sGui:createGuiElement(
+            "image",
+            rx + 4, ry + 4,
+            iw - 8, ih - 8,
+            mortarUI.window
+        )
+    end
+
+    -- IMPORTANT: sGui images use setImageFile(), not setGuiBackground()
+    exports.sGui:setImageFile(mortarUI.inputIcon, pic)
+    mortar_setQty(1)
+    mortar_buildQtyUi()
+end
 -- Creates a bordered panel from 2 background-drawn gui elements.
 -- Uses correct sGui API: setGuiBackground(el, "solid", "colorCode")
 local function mortar_createBorderedRect(parent, x, y, w, h, borderPx, borderColor, bgColor)
@@ -89,6 +468,15 @@ local function mortar_destroy()
     mortarUI.outputSlotBorder = false
     mortarUI.grindBorder = false
     mortarUI.addBtn = false
+    mortarUI.inputIcon = false
+    mortarUI.inputIconPath = false
+    mortar_clearQtyUi()
+    mortarUI.inputQty = 1
+    mortarUI.qtyPlusBtn = false
+    mortarUI.qtyMinusBtn = false
+    mortarUI.inputQtyText = false
+    mortar_clearOutputUi()
+    mortar_tipDestroy()
 end
 
 local function mortar_getCursorPixels()
@@ -172,8 +560,15 @@ local function mortar_menuOpen()
 
         local b = exports.sGui:createGuiElement("button", mx + pad + 2, ry + 2, w - (pad * 2) - 4, rowH - 4, mortarUI.window)
         exports.sGui:setButtonText(b, string.format("%s (ID: %d)", it.name, it.id))
+
         exports.sGui:setGuiBackground(b, "solid", "sightgrey2")
         exports.sGui:setGuiHover(b, "solid", "sightgrey1")
+
+        -- Add item icon before the name (small enough to fit in the row)
+        local pic = mortar_itemPicPath(it.id)
+        if pic then
+            exports.sGui:setButtonIcon(b, pic)
+        end
 
         mortarUI.menuBtns[b] = { id = it.id, name = it.name }
     end
@@ -311,8 +706,30 @@ addEventHandler("onClientClick", root, function(button, state)
     if not mortar_isValid(mortarUI.grindBtn) then return end
 
     local hoverEl = exports.sGui:getGuiHoverElement()
-    if hoverEl == mortarUI.grindBtn then
-        exports.sGui:showInfobox("i", "Grind clicked (logic later).")
+    -- Grind button clicked
+    if hoverEl and mortar_isValid(mortarUI.grindBtn) and hoverEl == mortarUI.grindBtn then
+        if not mortarUI.selectedInputId then
+            exports.sGui:showInfobox("e", "Select an input item first.")
+            return
+        end
+
+        local inputId = tonumber(mortarUI.selectedInputId)
+        local inputQty = tonumber(mortarUI.inputQty) or 1
+        if inputQty < 1 then inputQty = 1 end
+
+        -- Request server to validate + take items, then start minigame
+        triggerServerEvent("sDrugRework:requestMortarGrind", resourceRoot, inputId, inputQty)
+        return
+    end
+    -- Qty buttons
+    if hoverEl and mortar_isValid(mortarUI.qtyPlusBtn) and hoverEl == mortarUI.qtyPlusBtn then
+        mortar_setQty((mortarUI.inputQty or 1) + 1)
+        return
+    end
+
+    if hoverEl and mortar_isValid(mortarUI.qtyMinusBtn) and hoverEl == mortarUI.qtyMinusBtn then
+        mortar_setQty((mortarUI.inputQty or 1) - 1) -- mortar_setQty clamps to 1
+        return
     end
 end)
 
@@ -334,6 +751,8 @@ addEventHandler("onClientClick", root, function(button, state)
         local pick = mortarUI.menuBtns[hoverEl]
         mortarUI.selectedInputId = pick.id
         mortarUI.selectedInputName = pick.name
+        mortar_setInputIcon(pick.id)
+        mortar_refreshOutputUi()
 
         exports.sGui:showInfobox("i", "Selected input: " .. pick.name .. " (ID: " .. pick.id .. ")")
         mortar_menuDestroy()
@@ -346,6 +765,61 @@ addEventHandler("onClientClick", root, function(button, state)
         -- (background/inner are not in menuBtns, so this is safe)
         mortar_menuDestroy()
     end
+end)
+
+addEventHandler("onClientRender", root, function()
+    if not mortar_isValid(mortarUI.window) then
+        mortar_tipDestroy()
+        return
+    end
+    if not isCursorShowing() then
+        mortar_tipDestroy()
+        return
+    end
+
+    if mortar_isCursorInGuiEl(mortarUI.inputIcon) then
+        mortar_tipShow(mortarUI.selectedInputName or "Input")
+        return
+    end
+
+    if mortar_isCursorInGuiEl(mortarUI.outputIcon) then
+        local inId = tonumber(mortarUI.selectedInputId)
+        local r = inId and MORTAR_RECIPES[inId]
+        mortar_tipShow((r and r.name) or "Output")
+        return
+    end
+
+    mortar_tipDestroy()
+end)
+
+addEvent("sDrugRework:startMortarMinigame", true)
+addEventHandler("sDrugRework:startMortarMinigame", resourceRoot, function(outId, outQty)
+    outId = tonumber(outId)
+    outQty = tonumber(outQty) or 0
+    if not outId or outQty <= 0 then return end
+
+    -- Close Mortar UI
+    if mortar_destroy then mortar_destroy() end
+
+    mortarGame.active = true
+    mortarGame.progress = 0
+    mortarGame.outId = outId
+    mortarGame.outQty = outQty
+
+    mortarGame_startSound()
+
+    -- Animation while grinding (loop)
+    setPedAnimation(localPlayer, "INT_HOUSE", "wash_up", -1, true, false, false, false)
+
+    showCursor(true)
+
+    addEventHandler("onClientRender", root, mortarGame_render)
+    addEventHandler("onClientClick", root, mortarGame_click)
+
+    bindKey("backspace", "down", mortarGame_cancelKey)
+    bindKey("escape", "down", mortarGame_cancelKey)
+
+    exports.sGui:showInfobox("i", "Click to grind...")
 end)
 
 -- =========================================
