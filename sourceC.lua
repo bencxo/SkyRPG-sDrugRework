@@ -5,6 +5,348 @@ local placingData = nil
 local ghostObj = nil
 local ghostRotZ = 0
 
+-- =========================================================
+-- Mortar & Pestle UI (BASE) - sGui compatible
+-- =========================================================
+
+-- Mortar input pool (example items)
+local MORTAR_INPUT_ITEMS = {
+    { id = 14,  name = "Cocaine Leaf" },
+    { id = 15,  name = "Poppy Straw" },
+    { id = 432, name = "Parazen Flower" },
+}
+
+local mortarUI = {
+    window = false,
+    inputSlot = false,
+    outputSlot = false,
+    grindBtn = false,
+    addBtn = false,
+    menu = false,
+    menuBtns = {},
+    selectedInputId = false,
+    selectedInputName = false,
+    menuInner = false,
+    menuBorder = false,   -- optional rename, but we’ll keep compatibility
+}
+
+local function mortar_makeFaIcon(name, size)
+    -- Best case: sGui exports it (some setups do)
+    if exports.sGui.getFaIconFilename then
+        return exports.sGui:getFaIconFilename(name, size, "solid")
+    end
+
+    -- Fallback: if it's global somehow (usually not across resources)
+    if type(getFaIconFilename) == "function" then
+        return getFaIconFilename(name, size, "solid")
+    end
+
+    return false
+end
+
+local function mortar_isValid(el)
+    return tonumber(el) and exports.sGui:isGuiElementValid(el)
+end
+
+-- Helper: apply SkyRPG color scheme correctly
+local function mortar_setPanelStyle(el)
+    if not mortar_isValid(el) then return end
+
+    exports.sGui:setGuiBackground(el, "sightblue")
+    exports.sGui:setGuiBackgroundBorder(el, 2, "sightmidgrey")
+
+    -- Important: prevents auto fading / red fallback
+    if exports.sGui.setGuiBackgroundAlpha then
+        exports.sGui:setGuiBackgroundAlpha(el, 255)
+    end
+end
+
+-- Creates a bordered panel from 2 background-drawn gui elements.
+-- Uses correct sGui API: setGuiBackground(el, "solid", "colorCode")
+local function mortar_createBorderedRect(parent, x, y, w, h, borderPx, borderColor, bgColor)
+    borderPx = tonumber(borderPx) or 2
+
+    -- Any unknown type still gets renderBackground() via drawGuiElement()
+    local outer = exports.sGui:createGuiElement("mortar_box", x, y, w, h, parent, true)
+    exports.sGui:setGuiBackground(outer, "solid", borderColor)
+
+    local inner = exports.sGui:createGuiElement("mortar_box", x + borderPx, y + borderPx, w - borderPx*2, h - borderPx*2, parent, true)
+    exports.sGui:setGuiBackground(inner, "solid", bgColor)
+
+    return outer, inner
+end
+
+local function mortar_destroy()
+    if mortar_isValid(mortarUI.window) then
+        exports.sGui:deleteGuiElement(mortarUI.window)
+    end
+
+    mortarUI.window = false
+    mortarUI.inputSlot = false
+    mortarUI.outputSlot = false
+    mortarUI.grindBtn = false
+    mortarUI.inputSlotBorder = false
+    mortarUI.outputSlotBorder = false
+    mortarUI.grindBorder = false
+    mortarUI.addBtn = false
+end
+
+local function mortar_getCursorPixels()
+    local cx, cy = getCursorPosition()
+    if not cx or not cy then return 0, 0 end
+    local sx, sy = guiGetScreenSize()
+    return math.floor(cx * sx), math.floor(cy * sy)
+end
+
+local function mortar_menuDestroy()
+    -- delete menu buttons
+    if mortarUI.menuBtns then
+        for el, _ in pairs(mortarUI.menuBtns) do
+            if mortar_isValid(el) then
+                exports.sGui:deleteGuiElement(el)
+            end
+        end
+    end
+    mortarUI.menuBtns = {}
+
+    -- delete inner
+    if mortar_isValid(mortarUI.menuInner) then
+        exports.sGui:deleteGuiElement(mortarUI.menuInner)
+    end
+    mortarUI.menuInner = false
+
+    -- delete outer/border
+    if mortar_isValid(mortarUI.menu) then
+        exports.sGui:deleteGuiElement(mortarUI.menu)
+    end
+    mortarUI.menu = false
+end
+
+local function mortar_menuOpen()
+    -- toggle behavior
+    if mortar_isValid(mortarUI.menu) then
+        mortar_menuDestroy()
+        return
+    end
+
+    if not mortar_isValid(mortarUI.addBtn) then return end
+    if not mortar_isValid(mortarUI.window) then return end
+
+    -- RELATIVE to the window (this is what we need since menu is parented to window)
+    local bx, by = exports.sGui:getGuiPosition(mortarUI.addBtn)
+    local bw, bh = exports.sGui:getGuiSize(mortarUI.addBtn)
+
+    local w = 220
+    local rowH = 30
+    local pad = 2
+    local h = pad*2 + (#MORTAR_INPUT_ITEMS * rowH)
+
+    -- open to the right of the + icon (relative coords)
+    local mx = bx + bw + 6
+    local my = by
+
+    -- Keep it INSIDE the window bounds (relative clamp)
+    local winW, winH = exports.sGui:getGuiSize(mortarUI.window)
+
+    if mx + w > winW then
+        mx = bx - w - 6 -- open left if no space right
+    end
+    if my + h > winH then
+        my = winH - h - 6
+    end
+    if my < 6 then my = 6 end
+
+    -- Outer (border)
+    mortarUI.menu = exports.sGui:createGuiElement("mortar_box", mx, my, w, h, mortarUI.window, true)
+    exports.sGui:setGuiBackground(mortarUI.menu, "solid", "sightblue")
+
+    -- Inner (fill)
+    mortarUI.menuInner = exports.sGui:createGuiElement("mortar_box", mx + 2, my + 2, w - 4, h - 4, mortarUI.window, true)
+    exports.sGui:setGuiBackground(mortarUI.menuInner, "solid", "sightgrey2")
+
+    mortarUI.menuBtns = {}
+
+    for i = 1, #MORTAR_INPUT_ITEMS do
+        local it = MORTAR_INPUT_ITEMS[i]
+        local ry = my + pad + (i - 1) * rowH
+
+        local b = exports.sGui:createGuiElement("button", mx + pad + 2, ry + 2, w - (pad * 2) - 4, rowH - 4, mortarUI.window)
+        exports.sGui:setButtonText(b, string.format("%s (ID: %d)", it.name, it.id))
+        exports.sGui:setGuiBackground(b, "solid", "sightgrey2")
+        exports.sGui:setGuiHover(b, "solid", "sightgrey1")
+
+        mortarUI.menuBtns[b] = { id = it.id, name = it.name }
+    end
+end
+
+local function mortar_open()
+    if mortar_isValid(mortarUI.window) then
+        return
+    end
+
+    local sx, sy = guiGetScreenSize()
+    local w, h = 460, 260
+    local x, y = math.floor((sx - w) / 2), math.floor((sy - h) / 2)
+
+    -- Create window
+    mortarUI.window = exports.sGui:createGuiElement("window", x, y, w, h)
+
+    -- IMPORTANT: Your sGui expects font as STRING like "18/BebasNeueRegular.otf"
+    exports.sGui:setWindowTitle(mortarUI.window, "18/BebasNeueRegular.otf", "Mortar & Pestle")
+    exports.sGui:setWindowCloseButton(mortarUI.window, "sDrugRework:mortarClose", "times", "sightred")
+
+    -- Layout
+    -- Layout constants inside window
+    local pad = 18
+
+    -- Slot size for item icons (72x72)
+    local slotW, slotH = 72, 72
+
+    -- Vertical placement
+    local midY = 90
+
+    -- Center the whole input/output layout nicely
+    local centerX = w / 2
+    local leftX  = math.floor(centerX - slotW - 120)
+    local rightX = math.floor(centerX + 120)
+
+    -- Labels
+    local inputLbl = exports.sGui:createGuiElement("label", leftX, midY - 24, slotW, 20, mortarUI.window)
+    exports.sGui:setLabelText(inputLbl, "Input")
+    exports.sGui:setLabelAlignment(inputLbl, "center", "center")
+
+    local outputLbl = exports.sGui:createGuiElement("label", rightX, midY - 24, slotW, 20, mortarUI.window)
+    exports.sGui:setLabelText(outputLbl, "Output")
+    exports.sGui:setLabelAlignment(outputLbl, "center", "center")
+
+    -- Slot rectangles:
+    -- Any unknown type will still render via renderBackground() in your sGui,
+    -- so we can safely use a custom type like "rect".
+    -- Input slot (border + inner background)
+    mortarUI.inputSlotBorder, mortarUI.inputSlot = mortar_createBorderedRect(
+        mortarUI.window,
+        leftX, midY,
+        slotW, slotH,
+        2,
+        "sightgrey3",     -- border
+        "sightgrey2"      -- fill
+    )
+    -- + button next to the input slot (top-right side)
+    local plusSize = 22
+    local plusX = leftX + slotW + 10
+    local plusY = midY - 2
+
+    mortarUI.addBtn = exports.sGui:createGuiElement("button", plusX, plusY, plusSize, plusSize, mortarUI.window)
+
+    -- Style
+    exports.sGui:setGuiBackground(mortarUI.addBtn, "solid", "sightgrey2")
+    exports.sGui:setGuiHover(mortarUI.addBtn, "solid", "sightgrey1") -- subtle hover overlay
+    exports.sGui:setButtonText(mortarUI.addBtn, "") -- icon only
+
+    -- Icon (FontAwesome "plus")
+    local icon = mortar_makeFaIcon("plus", 18)
+    if icon then
+        exports.sGui:setButtonIcon(mortarUI.addBtn, icon)
+    else
+        -- fallback if fa generation isn't exported: show a simple "+"
+        exports.sGui:setButtonText(mortarUI.addBtn, "+")
+        exports.sGui:setButtonTextAlign(mortarUI.addBtn, "center", "center")
+    end
+
+    mortarUI.outputSlotBorder, mortarUI.outputSlot = mortar_createBorderedRect(
+        mortarUI.window,
+        rightX, midY,
+        slotW, slotH,
+        2,
+        "sightgrey3",
+        "sightgrey2"
+    )
+
+    -- Arrow
+    local arrowW = rightX - (leftX + slotW)
+    local arrowX = leftX + slotW
+    local arrowY = midY + slotH/2 - 10
+    local arrow = exports.sGui:createGuiElement("label", arrowX, arrowY, arrowW, 20, mortarUI.window)
+    exports.sGui:setLabelText(arrow, "----->")
+    exports.sGui:setLabelAlignment(arrow, "center", "center")
+
+    -- Grind button: make a bordered container, put the button inside it
+    local btnW, btnH = 140, 36
+    local btnX = math.floor((w - btnW) / 2)
+    local btnY = h - pad - btnH
+
+    -- Border behind the button
+    mortarUI.grindBorder, _ = mortar_createBorderedRect(
+        mortarUI.window,
+        btnX, btnY,
+        btnW, btnH,
+        2,
+        "sightgrey3",     -- border
+        "sightgrey3"
+    )
+
+    -- Button inside the border
+    mortarUI.grindBtn = exports.sGui:createGuiElement("button", btnX + 2, btnY + 2, btnW - 4, btnH - 4, mortarUI.window)
+    exports.sGui:setButtonText(mortarUI.grindBtn, "Grind")
+
+    -- Button fill (different from border)
+    exports.sGui:setGuiBackground(mortarUI.grindBtn, "solid", "sightblue")
+end
+
+-- Close event from the window X
+addEvent("sDrugRework:mortarClose", true)
+addEventHandler("sDrugRework:mortarClose", root, function(...)
+    mortar_menuDestroy()
+    mortar_destroy()
+end)
+
+-- Debug command to test
+addCommandHandler("mortarui", function()
+    mortar_open()
+end)
+
+-- TEMP: detect Grind click (uses sGui hover element)
+addEventHandler("onClientClick", root, function(button, state)
+    if button ~= "left" or state ~= "down" then return end
+    if not mortar_isValid(mortarUI.grindBtn) then return end
+
+    local hoverEl = exports.sGui:getGuiHoverElement()
+    if hoverEl == mortarUI.grindBtn then
+        exports.sGui:showInfobox("i", "Grind clicked (logic later).")
+    end
+end)
+
+addEventHandler("onClientClick", root, function(button, state)
+    if button ~= "left" or state ~= "up" then return end
+    if not mortar_isValid(mortarUI.window) then return end
+    if not isCursorShowing() then return end
+
+    local hoverEl = exports.sGui:getGuiHoverElement()
+
+    -- 1) PLUS BUTTON: toggle menu (open/close) and STOP
+    if hoverEl and mortar_isValid(mortarUI.addBtn) and hoverEl == mortarUI.addBtn then
+        mortar_menuOpen() -- this already toggles
+        return
+    end
+
+    -- 2) MENU ITEM: pick and close
+    if hoverEl and mortarUI.menuBtns and mortarUI.menuBtns[hoverEl] then
+        local pick = mortarUI.menuBtns[hoverEl]
+        mortarUI.selectedInputId = pick.id
+        mortarUI.selectedInputName = pick.name
+
+        exports.sGui:showInfobox("i", "Selected input: " .. pick.name .. " (ID: " .. pick.id .. ")")
+        mortar_menuDestroy()
+        return
+    end
+
+    -- 3) CLICKED OUTSIDE MENU: close it
+    if mortar_isValid(mortarUI.menu) then
+        -- If you clicked something that is NOT part of the menu, close it
+        -- (background/inner are not in menuBtns, so this is safe)
+        mortar_menuDestroy()
+    end
+end)
 
 -- =========================================
 -- placed workbenches client-side list
@@ -376,14 +718,16 @@ addEventHandler("onClientClick", root, function(button, state)
     if not wbIcons.visible then return end
     if not isCursorShowing() then return end
 
-    local hoverEl = exports.sGui:getGuiHoverElement()  -- returns sGui element id (number)
+    local hoverEl = exports.sGui:getGuiHoverElement() -- returns sGui element id (number)
     if not hoverEl or not wbIcons.byEl or not wbIcons.byEl[hoverEl] then return end
 
     local arg = wbIcons.byEl[hoverEl]
 
     if arg == "mortar" then
-       exports.sGui:showInfobox("i", "Extract clicked (UI later).")  
-elseif arg == "extract" then
+        mortar_open()
+        return
+
+    elseif arg == "extract" then
         exports.sGui:showInfobox("i", "Extract clicked (UI later).")
 
     elseif arg == "dry" then
