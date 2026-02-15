@@ -831,6 +831,733 @@ addEventHandler("sDrugRework:startMortarMinigame", resourceRoot, function(outId,
     exports.sGui:showInfobox("i", "Őrlés folyamatban... Kattints a bal egérgombbal folyamatosan, amíg a csík meg nem telik. A minigame elhagyásához nyomd meg az 'ESC' gombot.")
 end)
 
+-- =========================================================
+-- Extraction UI (sGui) + Mixing minigame
+-- =========================================================
+
+-- CONFIG: set these item IDs (must match server)
+local EXTRACT_ITEM_COCA_PASTE    = 182 -- Kokain paszta (mortar output)
+local EXTRACT_ITEM_LIGHTER_FLUID = 23   -- TODO
+-- REQUIRED CONFIG (these must match server)
+local EXTRACT_ITEM_COLD_MIX = EXTRACT_ITEM_COLD_MIX or 17      -- you already have this set somewhere
+local EXTRACT_ITEM_STAGE2_ITEM17 = 17
+local EXTRACT_ITEM_BAKING_SODA = 26
+local EXTRACT_ITEM_HEATED_ALKALOID = 50 -- TODO: set your "Hevített Alkaloidkeverék" item ID
+local EXTRACT_ITEM_WET_BASE        = 51  -- output (Tiszta Kokain Bázis (Nedves))
+
+local function extract_itemPicPath(itemId)
+    if not exports.sItems or not exports.sItems.getItemPic then return false end
+    local rel = exports.sItems:getItemPic(tonumber(itemId))
+    if not rel or rel == "" then return false end
+    if type(rel) == "string" and rel:sub(1, 1) == ":" then return rel end
+    return ":sItems/" .. rel
+end
+
+local function sg_center(el)
+    if not (el and exports.sGui:isGuiElementValid(el)) then return end
+    local sw, sh = guiGetScreenSize()
+    local w, h = exports.sGui:getGuiSize(el)
+    local x = math.floor((sw - w) / 2)
+    local y = math.floor((sh - h) / 2)
+    exports.sGui:setGuiPosition(el, x, y, true) -- absolute
+end
+
+local extractUI = {
+    window = false,
+    recipeBtn = false,
+    recipeMenu = false,
+    recipeMenuBtns = {},
+    selectedRecipeKey = false,
+
+    -- left panel
+    leftIcon1 = false,
+    leftIcon2 = false,
+    mixBtn = false,
+
+    -- visuals
+    line1 = false,
+    line2 = false,
+}
+
+local EXTRACT_RECIPES_C = {
+    { key = "cocaine_base", name = "Kokain bázis" },
+    -- add more later:
+    -- { key = "xxx", name = "..." },
+}
+
+local function extract_safeDelete(el)
+    if el and exports.sGui and exports.sGui.isGuiElementValid and exports.sGui:isGuiElementValid(el) then
+        exports.sGui:deleteGuiElement(el)
+    end
+    return false
+end
+
+local function extract_close()
+    extractUI.window = extract_safeDelete(extractUI.window)
+    extractUI.recipeMenu = extract_safeDelete(extractUI.recipeMenu)
+    extractUI.recipeMenuBtns = {}
+    extractUI.selectedRecipeKey = false
+end
+
+addEvent("sDrugRework:closeExtractUI", true)
+addEventHandler("sDrugRework:closeExtractUI", root, function()
+    extract_close()
+end)
+
+local function extract_destroyRecipeMenu()
+    extractUI.recipeMenu = extract_safeDelete(extractUI.recipeMenu)
+    extractUI.recipeMenuBtns = {}
+end
+
+local function extract_openRecipeMenu()
+    extract_destroyRecipeMenu()
+    if not extractUI.window or not exports.sGui:isGuiElementValid(extractUI.window) then return end
+
+    -- simple dropdown under recipe button
+    local x, y, w, h = 20, 56, 220, 28 * #EXTRACT_RECIPES_C
+    extractUI.recipeMenu = exports.sGui:createGuiElement("rectangle", x, y, w, h, extractUI.window)
+    exports.sGui:setGuiBackground(extractUI.recipeMenu, "solid", {0, 0, 0, 180})
+
+    extractUI.recipeMenuBtns = {}
+    for i = 1, #EXTRACT_RECIPES_C do
+        local r = EXTRACT_RECIPES_C[i]
+        local btn = exports.sGui:createGuiElement("button", 0, (i-1)*28, w, 28, extractUI.recipeMenu)
+        exports.sGui:setGuiText(btn, r.name)
+        exports.sGui:setGuiFont(btn, "12/BebasNeueRegular.otf")
+        guiSetTooltip(btn, r.name, "right", "down")
+        extractUI.recipeMenuBtns[btn] = r.key
+    end
+end
+
+local function extract_selectRecipe(recipeKey)
+    extractUI.selectedRecipeKey = recipeKey
+    extract_destroyRecipeMenu()
+
+    if extractUI.recipeBtn and exports.sGui:isGuiElementValid(extractUI.recipeBtn) then
+        exports.sGui:setGuiText(extractUI.recipeBtn, "Recept: " .. tostring(recipeKey))
+    end
+
+    -- for now we only implement cocaine_base left panel; later we’ll switch layouts here
+end
+
+local function sg_faPath(name, size, style, border, color, border2)
+    -- base file (no tick suffix yet)
+    local base = exports.sGui:getFaIconFilename(name, size, style, false, border, color, border2)
+    local ticks = exports.sGui:getFaTicks()
+    local suf = (ticks and ticks[base]) or ""
+    return ":sGui/" .. base .. suf
+end
+
+local extractClickHandlerInstalled = false
+
+local function extract_onClick(btn, state)
+    if btn ~= "left" or state ~= "up" then return end
+    if not (extractUI.window and exports.sGui:isGuiElementValid(extractUI.window)) then return end
+
+    local h = exports.sGui:getGuiHoverElement()
+    if not h then return end
+
+    -- Separation
+    if h == extractUI.sepBtn then
+        triggerServerEvent("sDrugRework:requestExtractSeparate", resourceRoot)
+        return
+    end
+
+    -- Heat
+    if h == extractUI.heatBtn then
+        triggerServerEvent("sDrugRework:requestExtractHeat", resourceRoot)
+        return
+    end
+
+    -- Mix
+    if h == extractUI.mixBtn then
+        triggerServerEvent("sDrugRework:requestExtractMix", resourceRoot, "cocaine_base")
+        return
+    end
+end
+
+function extract_open()
+    if extractUI.window and exports.sGui:isGuiElementValid(extractUI.window) then
+        -- already open
+        return
+    end
+
+    -- Window
+    extractUI.window = exports.sGui:createGuiElement("window", 0, 0, 560, 260)
+    exports.sGui:setWindowTitle(extractUI.window, "18/BebasNeueRegular.otf", "Extraction")
+    exports.sGui:setWindowCloseButton(extractUI.window, "sDrugRework:closeExtractUI", "times", "sightred")
+    exports.sGui:setGuiColorScheme(extractUI.window, "dark") -- if your scheme exists; safe if it doesn't
+    sg_center(extractUI.window)
+
+    -- Recipe select button (top-left)
+    --extractUI.recipeBtn = exports.sGui:createGuiElement("button", 20, 18, 220, 30, extractUI.window)
+    --exports.sGui:setButtonText(extractUI.recipeBtn, "Recept kiválasztása")
+    --exports.sGui:setButtonFont(extractUI.recipeBtn, "12/BebasNeueRegular.otf")
+    --exports.sGui:guiSetTooltip(extractUI.recipeBtn, "Recept kiválasztása", "right", "down")
+
+    -- 2 vertical separator lines (3 halves)
+    -- window inner area roughly from y=60..240
+    extractUI.line1 = exports.sGui:createGuiElement("rectangle", 560/3, 60, 2, 180, extractUI.window)
+    extractUI.line2 = exports.sGui:createGuiElement("rectangle", (560/3)*2, 60, 2, 180, extractUI.window)
+    exports.sGui:setGuiBackground(extractUI.line1, "solid", {255, 255, 255, 35})
+    exports.sGui:setGuiBackground(extractUI.line2, "solid", {255, 255, 255, 35})
+
+    -- helper: set text on label safely (sGui API differences)
+    local function sg_setLabelText(el, text)
+        if exports.sGui.setLabelText then
+            exports.sGui:setLabelText(el, text)
+        elseif exports.sGui.setGuiText then
+            exports.sGui:setGuiText(el, text)
+        end
+    end
+
+    local function sg_setLabelFont(el, font)
+        if exports.sGui.setLabelFont then
+            exports.sGui:setLabelFont(el, font)
+        elseif exports.sGui.setGuiFont then
+            exports.sGui:setGuiFont(el, font)
+        end
+    end
+
+    extractUI.stage1Label = exports.sGui:createGuiElement("label", 0, 62, 200, 22, extractUI.window)
+    sg_setLabelText(extractUI.stage1Label, "Stage 1")
+    sg_setLabelFont(extractUI.stage1Label, "16/BebasNeueRegular.otf")
+
+    extractUI.mixIcon = exports.sGui:createGuiElement("image", 83, 99, 32, 32, extractUI.window)
+    exports.sGui:setImageFile(extractUI.mixIcon, sg_faPath("plus", 32, "solid"))
+
+    -- LEFT panel (only implemented for cocaine_base for now)
+    -- icons 16x16 + 16x16
+    extractUI.leftIcon1 = exports.sGui:createGuiElement("image", 30, 90, 48, 48, extractUI.window)
+    extractUI.leftIcon2 = exports.sGui:createGuiElement("image", 120, 90, 48, 48, extractUI.window)
+
+    local pic1 = extract_itemPicPath(EXTRACT_ITEM_COCA_PASTE)
+    local pic2 = extract_itemPicPath(EXTRACT_ITEM_LIGHTER_FLUID)
+    if pic1 then exports.sGui:setImageFile(extractUI.leftIcon1, pic1) end
+    if pic2 then exports.sGui:setImageFile(extractUI.leftIcon2, pic2) end
+
+    exports.sGui:guiSetTooltip(extractUI.leftIcon1, "Coca Paste", "right", "down")
+    exports.sGui:guiSetTooltip(extractUI.leftIcon2, "Lighter Fluid", "right", "down")
+
+    extractUI.mixBtn = exports.sGui:createGuiElement("button", 30, 170, 140, 32, extractUI.window)
+    exports.sGui:setButtonText(extractUI.mixBtn, "Keverés")
+    exports.sGui:setButtonFont(extractUI.mixBtn, "14/BebasNeueRegular.otf")
+
+    -- ===== MIDDLE panel: Stage 2 (Heating) =====
+    extractUI.stage2Label = exports.sGui:createGuiElement("label", 560/3 + 0, 62, 220, 22, extractUI.window)
+    sg_setLabelText(extractUI.stage2Label, "Stage 2")
+    sg_setLabelFont(extractUI.stage2Label, "16/BebasNeueRegular.otf")
+
+    -- Fire FA icon (use your existing fa helper if you have it; otherwise you can skip this image)
+    extractUI.fireIcon = exports.sGui:createGuiElement("image", 560/3 + 85, 97, 32, 32, extractUI.window)
+    exports.sGui:setImageFile(extractUI.fireIcon, sg_faPath("fire", 32, "solid"))
+    -- Two 64x64 icons
+    extractUI.midIcon1 = exports.sGui:createGuiElement("image", 560/3 + 32, 90, 48, 48, extractUI.window)
+    extractUI.midIcon2 = exports.sGui:createGuiElement("image", 560/3 + 120, 90, 48, 48, extractUI.window)
+
+    local pic17 = extract_itemPicPath(EXTRACT_ITEM_STAGE2_ITEM17)
+    local pic26 = extract_itemPicPath(EXTRACT_ITEM_BAKING_SODA)
+    if pic17 then exports.sGui:setImageFile(extractUI.midIcon1, pic17) end
+    if pic26 then exports.sGui:setImageFile(extractUI.midIcon2, pic26) end
+
+    exports.sGui:guiSetTooltip(extractUI.midIcon1, "Item #17")
+    exports.sGui:guiSetTooltip(extractUI.midIcon2, "Szódabikarbóna")
+
+    -- Heat button (lower)
+    extractUI.heatBtn = exports.sGui:createGuiElement("button", 560/3 + 30, 170, 140, 32, extractUI.window)
+    exports.sGui:setButtonText(extractUI.heatBtn, "Felmelegítés")
+    exports.sGui:setButtonFont(extractUI.heatBtn, "14/BebasNeueRegular.otf")
+
+    -- ===== RIGHT panel: Stage 3 (Separation) =====
+    extractUI.stage3Label = exports.sGui:createGuiElement("label", (560/3)*2 + 20, 62, 220, 22, extractUI.window)
+    sg_setLabelText(extractUI.stage3Label, "Stage 3")
+    sg_setLabelFont(extractUI.stage3Label, "16/BebasNeueRegular.otf")
+
+    -- input icon (64x64)
+    extractUI.rightIcon = exports.sGui:createGuiElement("image", (560/3)*2 + 85, 95, 64, 64, extractUI.window)
+    local pic50 = extract_itemPicPath(EXTRACT_ITEM_HEATED_ALKALOID)
+    if pic50 then exports.sGui:setImageFile(extractUI.rightIcon, pic50) end
+    exports.sGui:guiSetTooltip(extractUI.rightIcon, "Hevített Alkaloidkeverék")
+
+    -- arrows-alt fa icon under it (32x32)
+    extractUI.arrowsIcon = exports.sGui:createGuiElement("image", (560/3)*2 + 101, 165, 32, 32, extractUI.window)
+    if sg_faPath then
+        exports.sGui:setImageFile(extractUI.arrowsIcon, sg_faPath("arrows-alt", 32, "solid"))
+    end
+    exports.sGui:guiSetTooltip(extractUI.arrowsIcon, "Elkülönítés")
+
+    -- button
+    extractUI.sepBtn = exports.sGui:createGuiElement("button", (560/3)*2 + 30, 205, 220, 36, extractUI.window)
+    exports.sGui:setButtonText(extractUI.sepBtn, "Elkülönítés")
+    exports.sGui:setButtonFont(extractUI.sepBtn, "14/BebasNeueRegular.otf")
+    exports.sGui:guiSetTooltip(extractUI.sepBtn, "Elkülönítés")
+
+    -- Click handling using hover element like your other UIs
+    if not extractClickHandlerInstalled then
+        addEventHandler("onClientClick", root, extract_onClick)
+        extractClickHandlerInstalled = true
+    end
+end
+
+-- debug command if you want
+addCommandHandler("extractui", function()
+    extract_open()
+end)
+
+local EXTRACT_GAME = {
+    active = false,
+    startTick = 0,
+    duration = 5000,
+    presses = 0,
+    pressesNeeded = 40,
+    wasCursor = false,
+    sent = false,
+    watchdog = false
+}
+
+local extractSndMix = false
+local extractSndHeat = false
+local extractSndSep = false
+
+local function extract_stopMixSound()
+    if isElement(extractSndMix) then
+        destroyElement(extractSndMix)
+    end
+    extractSndMix = false
+end
+
+local function extract_stopHeatSound()
+    if isElement(extractSndHeat) then
+        destroyElement(extractSndHeat)
+    end
+    extractSndHeat = false
+end
+
+local function extract_stopSepSound()
+    if isElement(extractSndSep) then destroyElement(extractSndSep) end
+    extractSndSep = false
+end
+
+local function extract_stopAllMinigameSounds()
+    extract_stopMixSound()
+    extract_stopHeatSound()
+    extract_stopSepSound()
+end
+
+
+local function extract_gameCleanup()
+    removeEventHandler("onClientRender", root, extract_gameRender)
+    removeEventHandler("onClientKey", root, extract_gameKey)
+    extract_stopMixSound()
+
+    if isTimer(EXTRACT_GAME.watchdog) then killTimer(EXTRACT_GAME.watchdog) end
+    EXTRACT_GAME.watchdog = false
+
+    EXTRACT_GAME.active = false
+end
+
+local function extract_gameFinish(success)
+    if not EXTRACT_GAME.active or EXTRACT_GAME.sent then return end
+    EXTRACT_GAME.sent = true
+
+    extract_gameCleanup()
+    extract_stopMixSound()
+    triggerServerEvent("sDrugRework:finishExtractMix", resourceRoot, success and true or false)
+end
+
+function extract_gameKey(key, press)
+    if not EXTRACT_GAME.active or not press then return end
+
+    if key == "space" then
+        EXTRACT_GAME.presses = EXTRACT_GAME.presses + 1
+        if EXTRACT_GAME.presses >= EXTRACT_GAME.pressesNeeded then
+            extract_gameFinish(true)
+        end
+
+    elseif key == "escape" then
+        extract_gameFinish(false)
+
+    elseif key == "m" then
+        -- IMPORTANT: let your own mouse-mode script work again
+        -- we finish+cleanup so cursor won't be stuck
+        extract_gameFinish(false)
+    end
+end
+
+function extract_gameRender()
+    if not EXTRACT_GAME.active then return end
+
+    local now = getTickCount()
+    local elapsed = now - EXTRACT_GAME.startTick
+    local left = math.max(0, EXTRACT_GAME.duration - elapsed)
+
+    local progress = math.min(1, EXTRACT_GAME.presses / EXTRACT_GAME.pressesNeeded)
+
+    local sx, sy = guiGetScreenSize()
+    local w, h = 360, 22
+    local x, y = sx/2 - w/2, sy/2 + 90
+
+    dxDrawRectangle(x, y, w, h, tocolor(0, 0, 0, 180))
+    dxDrawRectangle(x+2, y+2, (w-4) * progress, h-4, tocolor(255, 255, 255, 210))
+    dxDrawText(string.format("Keverés... %0.1fs  (%d/%d)", left/1000, EXTRACT_GAME.presses, EXTRACT_GAME.pressesNeeded),
+        x, y - 26, x+w, y, tocolor(255,255,255,220), 1, "default-bold", "center", "bottom")
+
+    if elapsed >= EXTRACT_GAME.duration then
+        extract_gameFinish(false)
+    end
+end
+
+addEvent("sDrugRework:startExtractMixMinigame", true)
+addEventHandler("sDrugRework:startExtractMixMinigame", resourceRoot, function()
+    if extract_close then extract_close() end
+
+    extract_stopMixSound()
+    extractSndMix = playSound("files/mixing.mp3", false)
+
+    EXTRACT_GAME.active = true
+    EXTRACT_GAME.sent = false
+    EXTRACT_GAME.startTick = getTickCount()
+    EXTRACT_GAME.presses = 0
+
+    addEventHandler("onClientRender", root, extract_gameRender)
+    addEventHandler("onClientKey", root, extract_gameKey)
+
+    EXTRACT_GAME.watchdog = setTimer(function()
+        if EXTRACT_GAME.active and not EXTRACT_GAME.sent then
+            extract_gameFinish(false)
+        end
+    end, EXTRACT_GAME.duration + 800, 1)
+end)
+
+addEventHandler("onClientResourceStop", resourceRoot, function()
+    if EXTRACT_GAME.active then
+        extract_gameCleanup()
+        extract_stopAllMinigameSounds()
+    end
+end)
+
+-- =========================================================
+-- Stage 2 Heating Minigame (no cursor control!)
+-- =========================================================
+
+local HEAT_GAME = {
+    active = false,
+    startTick = 0,
+
+    heat = 0,             -- 0..100
+    heating = false,
+
+    orangeMin = 62,       -- target band (upper-middle)
+    orangeMax = 75,
+    failAt = 92,          -- too hot threshold
+
+    holdNeedMs = 3000,    -- must hold in orange for 3s
+    holdMs = 0,
+
+    lastTick = 0,
+    sent = false
+}
+
+local function heat_cleanup()
+    removeEventHandler("onClientRender", root, heat_render)
+    removeEventHandler("onClientKey", root, heat_key)
+    extract_stopHeatSound()
+    HEAT_GAME.active = false
+end
+
+local function heat_finish(success)
+    if not HEAT_GAME.active or HEAT_GAME.sent then return end
+    HEAT_GAME.sent = true
+    extract_stopAllMinigameSounds()
+    heat_cleanup()
+    extract_stopHeatSound()
+    triggerServerEvent("sDrugRework:finishExtractHeat", resourceRoot, success and true or false)
+end
+
+function heat_key(key, press)
+    if not HEAT_GAME.active then return end
+
+    if key == "space" then
+        HEAT_GAME.heating = press and true or false
+    elseif key == "escape" and press then
+        heat_finish(false)
+    end
+end
+
+local function draw_heat_bar(x, y, w, h, heat)
+    -- background
+    dxDrawRectangle(x, y, w, h, tocolor(0,0,0,180))
+
+    -- segments (bottom->top)
+    local function seg(y0, y1, r,g,b,a)
+        dxDrawRectangle(x+2, y0, w-4, y1-y0, tocolor(r,g,b,a))
+    end
+
+    local innerH = h - 4
+    local top = y + 2
+    local bottom = y + 2 + innerH
+
+    -- zone boundaries by % of bar height
+    local function yAt(pctFromBottom) -- pct 0..1
+        return bottom - innerH * pctFromBottom
+    end
+
+    -- blue 0-40%, yellow 40-60%, orange 60-80%, red 80-100%
+    seg(yAt(1.00), yAt(0.80), 220,  60,  60, 200) -- red top band
+    seg(yAt(0.80), yAt(0.60), 255, 140,  30, 200) -- orange
+    seg(yAt(0.60), yAt(0.40), 255, 220,  60, 200) -- yellow
+    seg(yAt(0.40), yAt(0.00),  60, 140, 255, 200) -- blue bottom band
+
+    -- current heat line
+    local pct = math.max(0, math.min(1, heat / 100))
+    local lineY = bottom - innerH * pct
+    dxDrawRectangle(x, lineY-1, w, 2, tocolor(255,255,255,240))
+
+    return lineY
+end
+
+function heat_render()
+    if not HEAT_GAME.active then return end
+
+    local now = getTickCount()
+    local dt = now - (HEAT_GAME.lastTick > 0 and HEAT_GAME.lastTick or now)
+    HEAT_GAME.lastTick = now
+    if dt < 0 then dt = 0 end
+
+    -- heat physics
+    local upPerSec = 28   -- heating speed
+    local downPerSec = 20 -- cooling speed
+
+    if HEAT_GAME.heating then
+        HEAT_GAME.heat = HEAT_GAME.heat + upPerSec * (dt / 1000)
+    else
+        HEAT_GAME.heat = HEAT_GAME.heat - downPerSec * (dt / 1000)
+    end
+    if HEAT_GAME.heat < 0 then HEAT_GAME.heat = 0 end
+    if HEAT_GAME.heat > 100 then HEAT_GAME.heat = 100 end
+
+    -- fail if too hot
+    if HEAT_GAME.heat >= HEAT_GAME.failAt then
+        heat_finish(false)
+        return
+    end
+
+    -- hold logic (must be continuously inside orange band)
+    if HEAT_GAME.heat >= HEAT_GAME.orangeMin and HEAT_GAME.heat <= HEAT_GAME.orangeMax then
+        HEAT_GAME.holdMs = HEAT_GAME.holdMs + dt
+    else
+        HEAT_GAME.holdMs = 0
+    end
+
+    if HEAT_GAME.holdMs >= HEAT_GAME.holdNeedMs then
+        heat_finish(true)
+        return
+    end
+
+    -- draw
+    local sx, sy = guiGetScreenSize()
+    local barW, barH = 46, 320
+    local x = sx/2 - barW/2
+    local y = sy/2 - barH/2
+
+    local lineY = draw_heat_bar(x, y, barW, barH, HEAT_GAME.heat)
+
+    -- Celsius text next to line (map 0..100 => 20..200°C for flavor)
+    local c = math.floor(20 + (HEAT_GAME.heat/100) * 180)
+    dxDrawText(tostring(c) .. " °C", x + barW + 12, lineY - 10, x + barW + 200, lineY + 10,
+        tocolor(255,255,255,230), 1, "default-bold", "left", "center")
+
+    -- instruction + hold progress
+    local holdPct = math.floor((HEAT_GAME.holdMs / HEAT_GAME.holdNeedMs) * 100)
+    dxDrawText("Tartsd az ORANGE zónában 3 mp-ig!\nSPACE: fűtés (elengeded -> hűl)\nTartás: " .. holdPct .. "%", 
+        0, y + barH + 18, sx, y + barH + 80, tocolor(255,255,255,220), 1, "default-bold", "center", "top")
+end
+
+addEvent("sDrugRework:startExtractHeatMinigame", true)
+addEventHandler("sDrugRework:startExtractHeatMinigame", resourceRoot, function()
+    -- destroy GUI now (no cursor touching!)
+    if extract_close then extract_close() end
+
+    extract_stopHeatSound()
+    extractSndHeat = playSound("files/heating.mp3", true) -- loop
+
+    HEAT_GAME.active = true
+    HEAT_GAME.sent = false
+    HEAT_GAME.heat = 0
+    HEAT_GAME.heating = false
+    HEAT_GAME.holdMs = 0
+    HEAT_GAME.lastTick = getTickCount()
+
+    addEventHandler("onClientRender", root, heat_render)
+    addEventHandler("onClientKey", root, heat_key)
+end)
+
+addEventHandler("onClientResourceStop", resourceRoot, function()
+    if HEAT_GAME.active then
+        heat_cleanup()
+    end
+end)
+
+-- =========================================================
+-- Stage 3 Separation Minigame
+-- 3 rounds, need 2 successes. Space when line is in green zone.
+-- =========================================================
+
+local SEP_GAME = {
+    active = false,
+    sent = false,
+
+    round = 1,
+    wins = 0,
+    losses = 0,
+
+    pos = 0,            -- 0..1 line position from bottom to top
+    speed = 0.22,       -- increases each round
+    lastTick = 0,
+
+    greenStart = 0.0,   -- 0..1
+    greenEnd = 0.0
+}
+
+local function sep_cleanup()
+    removeEventHandler("onClientRender", root, sep_render)
+    removeEventHandler("onClientKey", root, sep_key)
+    SEP_GAME.active = false
+    extract_stopSepSound()
+end
+
+local function sep_finish(success)
+    if not SEP_GAME.active or SEP_GAME.sent then return end
+    SEP_GAME.sent = true
+    sep_cleanup()
+    triggerServerEvent("sDrugRework:finishExtractSeparate", resourceRoot, success and true or false)
+end
+
+local function sep_newGreenZone()
+    -- green bar random position; slightly smaller as difficulty rises
+    local baseSize = 0.20
+    local size = baseSize - (SEP_GAME.round - 1) * 0.04 -- round1:0.20, r2:0.16, r3:0.12
+    if size < 0.10 then size = 0.10 end
+
+    local start = math.random() * (1.0 - size)
+    SEP_GAME.greenStart = start
+    SEP_GAME.greenEnd = start + size
+end
+
+local function sep_nextRound()
+    SEP_GAME.round = SEP_GAME.round + 1
+
+    -- early fail: if already 2 losses you cannot reach 2 wins
+    if SEP_GAME.losses >= 2 then
+        sep_finish(false)
+        return
+    end
+
+    -- early success: if already 2 wins you’re done
+    if SEP_GAME.wins >= 2 then
+        sep_finish(true)
+        return
+    end
+
+    if SEP_GAME.round > 3 then
+        -- after 3 rounds: success if wins>=2
+        sep_finish(SEP_GAME.wins >= 2)
+        return
+    end
+
+    SEP_GAME.pos = 0
+    SEP_GAME.speed = 0.22 + (SEP_GAME.round - 1) * 0.12 -- r1 0.22, r2 0.34, r3 0.46
+    sep_newGreenZone()
+end
+
+function sep_key(key, press)
+    if not SEP_GAME.active or not press then return end
+
+    if key == "space" then
+        local p = SEP_GAME.pos
+        if p >= SEP_GAME.greenStart and p <= SEP_GAME.greenEnd then
+            SEP_GAME.wins = SEP_GAME.wins + 1
+        else
+            SEP_GAME.losses = SEP_GAME.losses + 1
+        end
+        sep_nextRound()
+        return
+    elseif key == "escape" then
+        sep_finish(false)
+        return
+    end
+end
+
+function sep_render()
+    if not SEP_GAME.active then return end
+
+    local now = getTickCount()
+    local dt = now - (SEP_GAME.lastTick > 0 and SEP_GAME.lastTick or now)
+    SEP_GAME.lastTick = now
+    if dt < 0 then dt = 0 end
+
+    SEP_GAME.pos = SEP_GAME.pos + SEP_GAME.speed * (dt / 1000)
+    if SEP_GAME.pos > 1.0 then
+        -- missed the timing window -> counts as fail for this round
+        SEP_GAME.losses = SEP_GAME.losses + 1
+        sep_nextRound()
+        return
+    end
+
+    local sx, sy = guiGetScreenSize()
+    local barW, barH = 54, 320
+    local x = sx/2 - barW/2
+    local y = sy/2 - barH/2
+
+    -- background
+    dxDrawRectangle(x, y, barW, barH, tocolor(0,0,0,180))
+
+    -- green zone
+    local gY1 = y + barH - (barH * SEP_GAME.greenEnd)
+    local gY2 = y + barH - (barH * SEP_GAME.greenStart)
+    dxDrawRectangle(x+2, gY1, barW-4, gY2 - gY1, tocolor(60, 200, 90, 200))
+
+    -- moving line
+    local lineY = y + barH - (barH * SEP_GAME.pos)
+    dxDrawRectangle(x, lineY-1, barW, 2, tocolor(255,255,255,240))
+
+    -- UI text
+    dxDrawText(
+        string.format("Elkülönítés  (Kör: %d/3)  Siker: %d  Hiba: %d\nSPACE amikor a vonal ZÖLD-ben van",
+            SEP_GAME.round, SEP_GAME.wins, SEP_GAME.losses),
+        0, y + barH + 18, sx, y + barH + 70,
+        tocolor(255,255,255,220), 1, "default-bold", "center", "top"
+    )
+end
+
+addEvent("sDrugRework:startExtractSeparateMinigame", true)
+addEventHandler("sDrugRework:startExtractSeparateMinigame", resourceRoot, function()
+    -- close UI, do NOT touch cursor
+    if extract_close then extract_close() end
+
+    extract_stopAllMinigameSounds()
+    extractSndSep = playSound("files/separating.mp3", true) -- loop until finished
+
+    SEP_GAME.active = true
+    SEP_GAME.sent = false
+    SEP_GAME.round = 1
+    SEP_GAME.wins = 0
+    SEP_GAME.losses = 0
+    SEP_GAME.pos = 0
+    SEP_GAME.speed = 0.22
+    SEP_GAME.lastTick = getTickCount()
+    sep_newGreenZone()
+
+    addEventHandler("onClientRender", root, sep_render)
+    addEventHandler("onClientKey", root, sep_key)
+end)
+
+addEventHandler("onClientResourceStop", resourceRoot, function()
+    if SEP_GAME.active then
+        sep_cleanup()
+    end
+end)
+
 -- =========================================
 -- placed workbenches client-side list
 -- =========================================
@@ -1211,7 +1938,8 @@ addEventHandler("onClientClick", root, function(button, state)
         return
 
     elseif arg == "extract" then
-        exports.sGui:showInfobox("i", "Extract clicked (UI later).")
+        extract_open()
+        return
 
     elseif arg == "dry" then
         exports.sGui:showInfobox("i", "Dry clicked (UI later).")
