@@ -15,16 +15,16 @@ local ghostRotZ = 0
 
 -- Mortar input pool (example items)
 local MORTAR_INPUT_ITEMS = {
-    { id = 14,  name = "Cocaine Leaf" },
-    { id = 15,  name = "Poppy Straw" },
-    { id = 432, name = "Parazen Flower" },
+    { id = 14,  name = "Kokalevél" },
+    { id = 15,  name = "Mákszalma" },
+    { id = 432, name = "Parazen virág" },
 }
 
 -- input itemId -> output itemId (+ optional ratio)
 local MORTAR_RECIPES = {
-    [14]  = { out = 182, ratio = 1, name = "Coca Paste" },
-    [15]  = { out = 183, ratio = 1, name = "Poppy Resin" },
-    [432] = { out = 184, ratio = 1, name = "Parazen Extract" },
+    [14]  = { out = 182, ratio = 1, name = "Kokain paszta" },
+    [15]  = { out = 183, ratio = 1, name = "Mák cuccos" },
+    [432] = { out = 184, ratio = 1, name = "Parazen next" },
 }
 
 local mortarUI = {
@@ -137,7 +137,7 @@ local function mortarGame_stop(refund)
 
     if refund then
         triggerServerEvent("sDrugRework:cancelMortarGrind", resourceRoot)
-        exports.sGui:showInfobox("e", "Cancelled.")
+        exports.sGui:showInfobox("e", "Mivel kiléptél a minigame-ből így visszakaptad az alapanyagot.")
     end
 end
 
@@ -181,7 +181,7 @@ function mortarGame_click(button, state)
         mortarGame.progress = 1
 
         -- Success
-        exports.sGui:showInfobox("s", "Success!")
+        exports.sGui:showInfobox("s", "Siker!")
         triggerServerEvent("sDrugRework:finishMortarGrind", resourceRoot)
 
         mortarGame_stop(false)
@@ -312,6 +312,11 @@ local function mortar_refreshOutputUi()
         )
     end
     exports.sGui:setImageFile(mortarUI.outputIcon, pic)
+    local inId = tonumber(mortarUI.selectedInputId)
+    local r = inId and MORTAR_RECIPES[inId]
+    local outName = (r and r.name) or "Output"
+
+    exports.sGui:guiSetTooltip(mortarUI.outputIcon, outName)
 
     -- Qty label to the right of the icon, vertically centered
     local qtyX = rx + iconPad + iconSize + 6
@@ -383,6 +388,7 @@ local function mortar_buildQtyUi()
         exports.sGui:setButtonText(mortarUI.qtyMinusBtn, "-")
         exports.sGui:setGuiBackground(mortarUI.qtyMinusBtn, "solid", "sightgrey2")
         exports.sGui:setGuiHover(mortarUI.qtyMinusBtn, "solid", "sightgrey1")
+        exports.sGui:guiSetTooltip(mortarUI.qtyMinusBtn, "Decrease amount")
     end
 
     -- Plus (top-right)
@@ -391,6 +397,7 @@ local function mortar_buildQtyUi()
         exports.sGui:setButtonText(mortarUI.qtyPlusBtn, "+")
         exports.sGui:setGuiBackground(mortarUI.qtyPlusBtn, "solid", "sightgrey2")
         exports.sGui:setGuiHover(mortarUI.qtyPlusBtn, "solid", "sightgrey1")
+        exports.sGui:guiSetTooltip(mortarUI.qtyPlusBtn, "Increase amount")
     end
 
     -- Count label (bottom-right)
@@ -417,7 +424,7 @@ local function mortar_setInputIcon(itemId)
 
     local pic = mortar_itemPicPath(itemId)
     if not pic then
-        exports.sGui:showInfobox("e", "No item picture found for ID: " .. tostring(itemId))
+        exports.sGui:showInfobox("e", "Nincs kép! ID: " .. tostring(itemId))
         return
     end
 
@@ -437,6 +444,7 @@ local function mortar_setInputIcon(itemId)
 
     -- IMPORTANT: sGui images use setImageFile(), not setGuiBackground()
     exports.sGui:setImageFile(mortarUI.inputIcon, pic)
+    exports.sGui:guiSetTooltip(mortarUI.inputIcon, mortarUI.selectedInputName or "Input")
     mortar_setQty(1)
     mortar_buildQtyUi()
 end
@@ -559,7 +567,7 @@ local function mortar_menuOpen()
         local ry = my + pad + (i - 1) * rowH
 
         local b = exports.sGui:createGuiElement("button", mx + pad + 2, ry + 2, w - (pad * 2) - 4, rowH - 4, mortarUI.window)
-        exports.sGui:setButtonText(b, string.format("%s (ID: %d)", it.name, it.id))
+        exports.sGui:setButtonText(b, string.format("%s", it.name, it.id)) --(ID: %d)
 
         exports.sGui:setGuiBackground(b, "solid", "sightgrey2")
         exports.sGui:setGuiHover(b, "solid", "sightgrey1")
@@ -587,7 +595,7 @@ local function mortar_open()
     mortarUI.window = exports.sGui:createGuiElement("window", x, y, w, h)
 
     -- IMPORTANT: Your sGui expects font as STRING like "18/BebasNeueRegular.otf"
-    exports.sGui:setWindowTitle(mortarUI.window, "18/BebasNeueRegular.otf", "Mortar & Pestle")
+    exports.sGui:setWindowTitle(mortarUI.window, "18/BebasNeueRegular.otf", "Mozsár")
     exports.sGui:setWindowCloseButton(mortarUI.window, "sDrugRework:mortarClose", "times", "sightred")
 
     -- Layout
@@ -607,11 +615,11 @@ local function mortar_open()
 
     -- Labels
     local inputLbl = exports.sGui:createGuiElement("label", leftX, midY - 24, slotW, 20, mortarUI.window)
-    exports.sGui:setLabelText(inputLbl, "Input")
+    exports.sGui:setLabelText(inputLbl, "Alapanyag")
     exports.sGui:setLabelAlignment(inputLbl, "center", "center")
 
     local outputLbl = exports.sGui:createGuiElement("label", rightX, midY - 24, slotW, 20, mortarUI.window)
-    exports.sGui:setLabelText(outputLbl, "Output")
+    exports.sGui:setLabelText(outputLbl, "Termék")
     exports.sGui:setLabelAlignment(outputLbl, "center", "center")
 
     -- Slot rectangles:
@@ -637,6 +645,7 @@ local function mortar_open()
     exports.sGui:setGuiBackground(mortarUI.addBtn, "solid", "sightgrey2")
     exports.sGui:setGuiHover(mortarUI.addBtn, "solid", "sightgrey1") -- subtle hover overlay
     exports.sGui:setButtonText(mortarUI.addBtn, "") -- icon only
+    exports.sGui:guiSetTooltip(mortarUI.addBtn, "Add input item")
 
     -- Icon (FontAwesome "plus")
     local icon = mortar_makeFaIcon("plus", 18)
@@ -682,7 +691,7 @@ local function mortar_open()
 
     -- Button inside the border
     mortarUI.grindBtn = exports.sGui:createGuiElement("button", btnX + 2, btnY + 2, btnW - 4, btnH - 4, mortarUI.window)
-    exports.sGui:setButtonText(mortarUI.grindBtn, "Grind")
+    exports.sGui:setButtonText(mortarUI.grindBtn, "Őrlés")
 
     -- Button fill (different from border)
     exports.sGui:setGuiBackground(mortarUI.grindBtn, "solid", "sightblue")
@@ -709,7 +718,7 @@ addEventHandler("onClientClick", root, function(button, state)
     -- Grind button clicked
     if hoverEl and mortar_isValid(mortarUI.grindBtn) and hoverEl == mortarUI.grindBtn then
         if not mortarUI.selectedInputId then
-            exports.sGui:showInfobox("e", "Select an input item first.")
+            exports.sGui:showInfobox("e", "Kérlek válassz alapanyagot!")
             return
         end
 
@@ -754,7 +763,7 @@ addEventHandler("onClientClick", root, function(button, state)
         mortar_setInputIcon(pick.id)
         mortar_refreshOutputUi()
 
-        exports.sGui:showInfobox("i", "Selected input: " .. pick.name .. " (ID: " .. pick.id .. ")")
+        --exports.sGui:showInfobox("i", "Selected input: " .. pick.name .. " (ID: " .. pick.id .. ")")
         mortar_menuDestroy()
         return
     end
@@ -819,7 +828,7 @@ addEventHandler("sDrugRework:startMortarMinigame", resourceRoot, function(outId,
     bindKey("backspace", "down", mortarGame_cancelKey)
     bindKey("escape", "down", mortarGame_cancelKey)
 
-    exports.sGui:showInfobox("i", "Click to grind...")
+    exports.sGui:showInfobox("i", "Őrlés folyamatban... Kattints a bal egérgombbal folyamatosan, amíg a csík meg nem telik. A minigame elhagyásához nyomd meg az 'ESC' gombot.")
 end)
 
 -- =========================================
@@ -1083,10 +1092,10 @@ local FA = {
 }
 
 local TOOLTIPS = {
-    mortar = "Mortar & Pestle",
-    extract = "Extract",
-    dry = "Dry",
-    pickup = "Pick up Workbench",
+    mortar = "Mozsár",
+    extract = "Kivonás",
+    dry = "Szárítás",
+    pickup = "Asztal felvétele",
 }
 
 -- Utility: create one icon button
