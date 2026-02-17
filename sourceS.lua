@@ -136,12 +136,35 @@ local pending = {}
 -- Drying rack (persistent) - CONFIG
 -- =========================================================
 local DRY_CFG = {
-    BASE_IN  = 793,   -- coca base
-    ACETONE  = 794,   -- acetone
-    BASE_OUT = 17,  -- TODO: SET THIS to your "dried base" itemId
-    DURATION_SEC = 1 * 10, -- 10 minutes
+    BASE_IN  = {793, 451},   -- coca base (accepted ids)
+    ACETONE  = 794,          -- acetone
+    BASE_OUT = 17,           -- TODO: dried base output
+    DURATION_SEC = 1 * 10,   -- 10 minutes (your comment says minutes but value is 10 sec right now)
     NEAR_DIST = 4.0
 }
+
+local function isInList(val, list)
+    if type(list) ~= "table" then
+        return val == list
+    end
+    for i = 1, #list do
+        if list[i] == val then
+            return true
+        end
+    end
+    return false
+end
+
+-- Per-item requirements (based on your plan)
+local DRY_REQUIRE_ACETONE = {
+    [793] = true, -- 793 needs acetone
+    -- [451] = nil/false -> no acetone needed
+}
+
+local DRY_REQUIRE_UV = {
+    [451] = true, -- 451 requires UV ON
+}
+
 
 local function nowUnix()
     return getRealTime().timestamp
@@ -748,7 +771,7 @@ addEventHandler("sDrugRework:dryRequestState", resourceRoot, function(benchId)
         st.startedAt = 0
         st.endAt = 0
         for _, idx in ipairs({1,2,4,5}) do
-            if tonumber(st.slots[idx]) == DRY_CFG.BASE_IN then
+            if isInList(tonumber(st.slots[idx]), DRY_CFG.BASE_IN) then
                 st.slots[idx] = DRY_CFG.BASE_OUT
             end
         end
@@ -798,11 +821,16 @@ addEventHandler("sDrugRework:dryPutItem", resourceRoot, function(benchId, slotIn
     end
 
     -- compatibility rules
-    local need = false
-    if slotIndex == 3 then need = DRY_CFG.ACETONE else need = DRY_CFG.BASE_IN end
-    if itemId ~= need then
-        exports.sGui:showInfobox(player, "e", "Nem megfelelő item ehhez a slothoz!")
-        return
+    if slotIndex == 3 then
+        if itemId ~= DRY_CFG.ACETONE then
+            exports.sGui:showInfobox(player, "e", "Nem megfelelő item ehhez a slothoz!")
+            return
+        end
+    else
+        if not isInList(itemId, DRY_CFG.BASE_IN) then
+            exports.sGui:showInfobox(player, "e", "Nem megfelelő item ehhez a slothoz!")
+            return
+        end
     end
 
     if not sitems_hasAtLeast(player, itemId, 1) then
@@ -875,25 +903,45 @@ addEventHandler("sDrugRework:dryStart", resourceRoot, function(benchId)
         return
     end
 
-    if tonumber(st.slots[3]) ~= DRY_CFG.ACETONE then
-        exports.sGui:showInfobox(player, "e", "Kell aceton a középső slotba!")
-        return
-    end
-
-    local hasBase = false
+    -- detect base type + prevent mixing
+    local baseId = nil
     for _, idx in ipairs({1,2,4,5}) do
-        if tonumber(st.slots[idx]) == DRY_CFG.BASE_IN then
-            hasBase = true
-            break
+        local it = tonumber(st.slots[idx])
+        if it then
+            if not isInList(it, DRY_CFG.BASE_IN) then
+                exports.sGui:showInfobox(player, "e", "Nem megfelelő alapanyag a szárító slotban!")
+                return
+            end
+            baseId = baseId or it
+            if baseId ~= it then
+                exports.sGui:showInfobox(player, "e", "Nem keverheted a különböző alapanyagokat szárításnál!")
+                return
+            end
         end
     end
-    if not hasBase then
-        exports.sGui:showInfobox(player, "e", "Tegyél be legalább 1 kokain bázist!")
+
+    if not baseId then
+        exports.sGui:showInfobox(player, "e", "Tegyél be legalább 1 alapanyagot!")
         return
     end
 
-    -- consume acetone
-    st.slots[3] = false
+    -- UV requirement (only for configured items, e.g. 451)
+    if DRY_REQUIRE_UV[baseId] then
+        if not uvLamps[benchId] then
+            exports.sGui:showInfobox(player, "e", "Ehhez az anyaghoz be kell kapcsolni az UV lámpát!")
+            return
+        end
+    end
+
+    -- acetone requirement (only for configured items, e.g. 793)
+    if DRY_REQUIRE_ACETONE[baseId] then
+        if tonumber(st.slots[3]) ~= DRY_CFG.ACETONE then
+            exports.sGui:showInfobox(player, "e", "Kell aceton a középső slotba!")
+            return
+        end
+        -- consume acetone only if required
+        st.slots[3] = false
+    end
 
     local n = nowUnix()
     st.active = true
