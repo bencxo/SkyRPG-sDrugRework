@@ -1811,10 +1811,12 @@ local SIDE_EXTRA_GAP = 15
 
 -- FontAwesome icon names (solid set by default)
 -- NOTE: If any name doesn't exist in your FA pack, sGui will fall back to "times".
+-- FontAwesome icon names (solid set by default)
 local FA = {
     mortar = "mortar-pestle",
     extract = "tint",
-    dry = "wind",
+    dry    = "wind",
+    uv     = "power-off",
     pickup = "inbox-out",
 }
 
@@ -1822,25 +1824,87 @@ local TOOLTIPS = {
     mortar = "Mozsár",
     extract = "Kivonás",
     dry = "Szárítás",
+    uv = "UV lámpa",
     pickup = "Asztal felvétele",
 }
+
+local ICON_TWEAK = {
+    mortar = { dx = 0, dy = 0 },
+    extract = { dx = 0, dy = 0 },
+    dry    = { dx = 0, dy = 0 },
+    uv     = { dx = 0, dy = 0 },
+
+    pickup = { dx = 0, dy = 0 },
+}
+
+-- Icons can be positioned either by the normal row layout ("row")
+-- or by a 3D anchor point on the bench model ("anchor")
+local ICON_MODE = {
+    mortar = "row",
+    extract = "row",
+    dry    = "row",
+    uv     = "anchor",  -- << UV icon attached to switch
+    pickup = "row",
+}
+
+-- Local-space anchor offsets on the BENCH MODEL (rotated with bench rotation)
+-- X+ = right, Y+ = forward, Z+ = up
+local ICON_ANCHOR = {
+    -- Base anchor for the whole row (optional, keep your current method if you want)
+    base = { x = 0.00, y = 0.00, z = 1.10 },
+
+    -- UV switch position (YOU will tune these)
+    uv = { x = 1.05, y = 0.00, z = 1.25 },
+}
+
+local function setIconPos(iconEl, baseX, baseY, tweakKey)
+    local t = ICON_TWEAK[tweakKey]
+    local dx = (t and t.dx) or 0
+    local dy = (t and t.dy) or 0
+    exports.sGui:setGuiPosition(iconEl, baseX + dx, baseY + dy)
+end
+
+local function getRotatedOffsetWorldPos(obj, ox, oy, oz)
+    local x, y, z = getElementPosition(obj)
+    local _, _, rz = getElementRotation(obj)
+    local rad = math.rad(rz)
+
+    local rx = ox * math.cos(rad) - oy * math.sin(rad)
+    local ry = ox * math.sin(rad) + oy * math.cos(rad)
+
+    return x + rx, y + ry, z + oz
+end
+
+-- Optional: show a little marker where the UV icon is anchored (for tuning)
+local wbAnchorDebug = { enabled = false, marker = false }
+
+local function updateUvAnchorDebugMarker()
+    if not wbAnchorDebug.enabled then return end
+    if not wbIcons.bench or not isElement(wbIcons.bench) then return end
+
+    local a = ICON_ANCHOR.uv
+    local x, y, z = getRotatedOffsetWorldPos(wbIcons.bench, a.x, a.y, a.z)
+
+    if not isElement(wbAnchorDebug.marker) then
+        wbAnchorDebug.marker = createMarker(x, y, z, "corona", 0.18, 200, 120, 255, 220)
+        if wbAnchorDebug.marker then setElementCollisionsEnabled(wbAnchorDebug.marker, false) end
+    else
+        setElementPosition(wbAnchorDebug.marker, x, y, z)
+    end
+end
+
 
 -- Utility: create one icon button
 local function createIcon(parent, faName, tooltipText, clickArg)
     local el = exports.sGui:createGuiElement("image", 0, 0, ICON_SIZE, ICON_SIZE, parent)
-
     local file = exports.sGui:getFaIconFilename(faName, ICON_SIZE, "solid")
     exports.sGui:setImageFile(el, file)
-
     exports.sGui:setGuiHoverable(el, true)
     exports.sGui:setImageFadeHover(el, false)
     exports.sGui:guiSetTooltip(el, tooltipText, "right", "down")
 
-    -- We DO NOT call setClickEvent / setClickArgument at all.
-    -- We'll handle click via hover detection.
     wbIcons.byEl = wbIcons.byEl or {}
     wbIcons.byEl[el] = clickArg
-
     return el
 end
 
@@ -1861,32 +1925,26 @@ local function showWorkbenchIconsForBench(benchObj)
 
     wbIcons.bench = benchObj
     currentIconBench = benchObj
-    wbIcons.root = exports.sGui:createGuiElement("null", 0, 0, 1, 1) -- container with children :contentReference[oaicite:14]{index=14}
 
-    -- Build 3 icons row + 1 below middle
+    wbIcons.root = exports.sGui:createGuiElement("null", 0, 0, 1, 1)
+
+    -- Build 4 icons row + 1 below the 2nd icon (extract)
     local mortar = createIcon(wbIcons.root, FA.mortar, TOOLTIPS.mortar, "mortar")
     local extract = createIcon(wbIcons.root, FA.extract, TOOLTIPS.extract, "extract")
     local dry = createIcon(wbIcons.root, FA.dry, TOOLTIPS.dry, "dry")
+    local uv = createIcon(wbIcons.root, FA.uv, TOOLTIPS.uv, "uv")
     local pickup = createIcon(wbIcons.root, FA.pickup, TOOLTIPS.pickup, "pickup")
 
-    wbIcons.elements = {
-        mortar = mortar,
-        extract = extract,
-        dry = dry,
-        pickup = pickup
-    }
-
+    wbIcons.elements = { mortar = mortar, extract = extract, dry = dry, uv = uv, pickup = pickup }
     wbIcons.visible = true
 end
 
--- Anchor update: keep icons positioned over the bench in screen space
 local function updateWorkbenchIcons()
     if not wbIcons.visible or not isElement(wbIcons.bench) then
         destroyWorkbenchIcons()
         return
     end
 
-    -- If player walks away, hide them (for now)
     local px, py, pz = getElementPosition(localPlayer)
     local bx, by, bz = getElementPosition(wbIcons.bench)
     if getDistanceBetweenPoints3D(px, py, pz, bx, by, bz) > SHOW_DIST then
@@ -1894,27 +1952,46 @@ local function updateWorkbenchIcons()
         return
     end
 
-    -- Project bench world point to screen
     local sx, sy = getScreenFromWorldPosition(bx, by, bz + WORLD_Z_OFFSET)
-    if not sx or not sy then
-        -- off-screen
-        return
-    end
+    if not sx or not sy then return end
 
-    -- Layout:
-    -- [mortar] [extract] [dry]
-    --          [pickup]
-    local totalW = ICON_SIZE * 3 + ICON_GAP * 2 + SIDE_EXTRA_GAP * 2
+    -- Row layout (4 icons)
+    local totalW = ICON_SIZE * 4 + ICON_GAP * 3
     local startX = sx - totalW / 2
     local rowY = sy + ROW_Y_OFF
 
-    exports.sGui:setGuiPosition(wbIcons.elements.mortar, startX, rowY) -- :contentReference[oaicite:15]{index=15}
-    exports.sGui:setGuiPosition(wbIcons.elements.extract, startX + ICON_SIZE + ICON_GAP + SIDE_EXTRA_GAP, rowY) -- :contentReference[oaicite:16]{index=16}
-    exports.sGui:setGuiPosition(wbIcons.elements.dry, startX + (ICON_SIZE + ICON_GAP) * 2 + SIDE_EXTRA_GAP * 2, rowY) -- :contentReference[oaicite:17]{index=17}
+    local x0 = startX + (ICON_SIZE + ICON_GAP) * 0
+    local x1 = startX + (ICON_SIZE + ICON_GAP) * 1
+    local x2 = startX + (ICON_SIZE + ICON_GAP) * 2
+    local x3 = startX + (ICON_SIZE + ICON_GAP) * 3
 
-    -- pickup under the center icon
-    local pickupX = startX + ICON_SIZE + ICON_GAP + SIDE_EXTRA_GAP
-    exports.sGui:setGuiPosition(wbIcons.elements.pickup, pickupX, rowY + ICON_SIZE + PICKUP_Y_OFF) -- :contentReference[oaicite:18]{index=18}
+    setIconPos(wbIcons.elements.mortar, x0, rowY, "mortar")
+    setIconPos(wbIcons.elements.extract, x1, rowY, "extract")
+    setIconPos(wbIcons.elements.dry,    x2, rowY, "dry")
+    -- UV icon: either row or 3D anchor
+    if ICON_MODE.uv == "anchor" then
+        local a = ICON_ANCHOR.uv
+        local wx, wy, wz = getRotatedOffsetWorldPos(wbIcons.bench, a.x, a.y, a.z)
+        local usx, usy = getScreenFromWorldPosition(wx, wy, wz)
+
+        if usx and usy then
+            -- center the icon on the anchor point
+            setIconPos(wbIcons.elements.uv, usx - ICON_SIZE / 2, usy - ICON_SIZE / 2, "uv")
+        else
+            -- fallback to row placement if off-screen
+            setIconPos(wbIcons.elements.uv, x3, rowY, "uv")
+        end
+    else
+        setIconPos(wbIcons.elements.uv, x3, rowY, "uv")
+    end
+
+    -- update debug marker (optional)
+    updateUvAnchorDebugMarker()
+
+    -- pickup under extract
+    local pickupX = x1
+    local pickupY = rowY + ICON_SIZE + PICKUP_Y_OFF
+    setIconPos(wbIcons.elements.pickup, pickupX, pickupY, "pickup")
 end
 
 addEventHandler("onClientRender", root, function()
@@ -1956,6 +2033,20 @@ addEventHandler("onClientClick", root, function(button, state)
         dry_open(benchId)
         return
 
+    elseif arg == "uv" then
+        if not currentIconBench or not isElement(currentIconBench) then
+            exports.sGui:showInfobox("e", "Nincs asztal a közelben!")
+            return
+        end
+        local benchId = tonumber(getElementData(currentIconBench, "drugworkbench.id"))
+        if not benchId then
+            exports.sGui:showInfobox("e", "Hibás asztal azonosító!")
+            return
+        end
+        playSound("files/uvlamp.mp3", false)
+        triggerServerEvent("sDrugRework:toggleUvLamp", resourceRoot, benchId)
+        return
+
     elseif arg == "pickup" then
         if not currentIconBench or not isElement(currentIconBench) then
             exports.sGui:showInfobox("e", "Nincs asztal a közelben!")
@@ -1971,6 +2062,66 @@ addEventHandler("onClientClick", root, function(button, state)
         triggerServerEvent("sDrugRework:pickupWorkbench", resourceRoot, benchId)
     end
 end)
+
+addCommandHandler("wbtweak", function(_, key, dx, dy)
+    if not key or not ICON_TWEAK[key] then
+        outputChatBox("Usage: /wbtweak mortar|extract|dry|uv|pickup dx dy", 255, 200, 100)
+        return
+    end
+    dx, dy = tonumber(dx), tonumber(dy)
+    if not dx or not dy then
+        outputChatBox("Usage: /wbtweak <icon> <dx> <dy>", 255, 200, 100)
+        return
+    end
+
+    ICON_TWEAK[key].dx = dx
+    ICON_TWEAK[key].dy = dy
+    outputChatBox(("Workbench icon tweak %s = dx:%d dy:%d"):format(key, dx, dy), 120, 200, 255)
+end)
+
+addCommandHandler("wbuvanchor", function(_, x, y, z)
+    x, y, z = tonumber(x), tonumber(y), tonumber(z)
+    if not x or not y or not z then
+        outputChatBox("Usage: /wbuvanchor x y z   (local offsets; x=right y=forward z=up)", 255, 200, 100)
+        return
+    end
+
+    ICON_ANCHOR.uv.x = x
+    ICON_ANCHOR.uv.y = y
+    ICON_ANCHOR.uv.z = z
+
+    outputChatBox(("[WB] UV anchor set to: x=%.2f y=%.2f z=%.2f"):format(x, y, z), 120, 200, 255)
+end)
+
+
+addCommandHandler("wbuvnudge", function(_, axis, amount)
+    amount = tonumber(amount)
+    if not axis or not amount then
+        outputChatBox("Usage: /wbuvnudge x|y|z amount  (example: /wbuvnudge x 0.05)", 255, 200, 100)
+        return
+    end
+
+    local a = ICON_ANCHOR.uv
+    if axis == "x" then a.x = a.x + amount
+    elseif axis == "y" then a.y = a.y + amount
+    elseif axis == "z" then a.z = a.z + amount
+    else
+        outputChatBox("Axis must be x, y, or z.", 255, 100, 100)
+        return
+    end
+
+    outputChatBox(("[WB] UV anchor now: x=%.2f y=%.2f z=%.2f"):format(a.x, a.y, a.z), 120, 200, 255)
+end)
+
+addCommandHandler("wbuvdebug", function()
+    wbAnchorDebug.enabled = not wbAnchorDebug.enabled
+    if not wbAnchorDebug.enabled then
+        if isElement(wbAnchorDebug.marker) then destroyElement(wbAnchorDebug.marker) end
+        wbAnchorDebug.marker = false
+    end
+    outputChatBox("[WB] UV anchor debug: " .. (wbAnchorDebug.enabled and "ON" or "OFF"), 120, 200, 255)
+end)
+
 
 -- =========================================================
 -- Drying Rack (client UI + timer display)
@@ -2470,6 +2621,229 @@ setTimer(function()
     end
 end, NEAR_SCAN_MS, 0)
 
+-- =========================================================
+-- UV Lamp (client) - beam render per benchId
+-- =========================================================
+local UVLAMP = {
+    tex = false,
+    enabledByBench = {}, -- [benchId] = true/false
+
+    -- Beam look
+    outerW = 0.85,
+    innerW = 0.35,
+
+    -- Offsets relative to bench origin (tweak these!)
+    startOff = { x = 0.95, y = 0.00, z = 1.52 }, -- lamp bulb
+    endOff   = { x = 0.95, y = 0.00, z = 1.00 }, -- tray / target
+}
+
+UVLAMP.rayCount = 8      -- 4/6/8/12 (8 is a nice sweet spot)
+UVLAMP.rayRadius = 0.06  -- how far rays are offset from center (0.03–0.10)
+UVLAMP.rayWidth = 0.18   -- thickness of each ray
+UVLAMP.rayAlpha = 35     -- transparency for rays
+UVLAMP.length = 0.50      -- beam length (like before)
+UVLAMP.pitch  = 0        -- X axis rotation (degrees)
+UVLAMP.yaw    = 0        -- Z axis rotation (degrees)
+UVLAMP.roll   = 30        -- Y axis rotation (degrees) (optional use)
+
+local function rotateOffsetByObj(obj, ox, oy)
+    local _, _, rz = getElementRotation(obj)
+    local rad = math.rad(rz)
+    local rx = ox * math.cos(rad) - oy * math.sin(rad)
+    local ry = ox * math.sin(rad) + oy * math.cos(rad)
+    return rx, ry
+end
+
+local function deg2rad(d) return d * math.pi / 180 end
+
+-- Rotate a local vector by pitch(X), roll(Y), yaw(Z) in degrees
+-- Order: pitch -> roll -> yaw (works well for this use)
+local function rotateVecLocal(vx, vy, vz, pitch, roll, yaw)
+    local px, ry, yz = deg2rad(pitch), deg2rad(roll), deg2rad(yaw)
+
+    -- pitch around X
+    do
+        local c, s = math.cos(px), math.sin(px)
+        local ny = vy * c - vz * s
+        local nz = vy * s + vz * c
+        vy, vz = ny, nz
+    end
+
+    -- roll around Y
+    do
+        local c, s = math.cos(ry), math.sin(ry)
+        local nx = vx * c + vz * s
+        local nz = -vx * s + vz * c
+        vx, vz = nx, nz
+    end
+
+    -- yaw around Z
+    do
+        local c, s = math.cos(yz), math.sin(yz)
+        local nx = vx * c - vy * s
+        local ny = vx * s + vy * c
+        vx, vy = nx, ny
+    end
+
+    return vx, vy, vz
+end
+
+-- Convert a LOCAL direction vector to WORLD direction using element matrix
+local function localDirToWorld(obj, lx, ly, lz)
+    -- getElementMatrix returns 4 rows:
+    -- { rightX, rightY, rightZ, rightW }
+    -- { fwdX,   fwdY,   fwdZ,   fwdW }
+    -- { upX,    upY,    upZ,    upW }
+    -- { posX,   posY,   posZ,   posW }
+    local m = getElementMatrix(obj)
+    local rx, ry, rz = m[1][1], m[1][2], m[1][3]
+    local fx, fy, fz = m[2][1], m[2][2], m[2][3]
+    local ux, uy, uz = m[3][1], m[3][2], m[3][3]
+
+    local wx = rx * lx + fx * ly + ux * lz
+    local wy = ry * lx + fy * ly + uy * lz
+    local wz = rz * lx + fz * ly + uz * lz
+    return wx, wy, wz
+end
+
+
+
+addEvent("sDrugRework:setUvLampState", true)
+addEventHandler("sDrugRework:setUvLampState", resourceRoot, function(benchId, state)
+    benchId = tonumber(benchId)
+    if not benchId then return end
+
+    state = state and true or false
+
+    -- detect change (so we don't spam sound on initial sync)
+    local old = UVLAMP.enabledByBench[benchId]
+    UVLAMP.enabledByBench[benchId] = state
+
+    if old == nil or old == state then
+        return
+    end
+
+    -- play 3D sound at bench for nearby players
+    local entry = placedById and placedById[benchId]
+    if entry and isElement(entry.obj) then
+        local x, y, z = getElementPosition(entry.obj)
+
+        local snd = playSound3D("files/uvlamp.mp3", x, y, z, false)
+        if snd then
+            setSoundMaxDistance(snd, 18)   -- tweak range
+            setSoundVolume(snd, 0.8)       -- tweak loudness
+        end
+    end
+end)
+
+
+local function ensureUvTex()
+    if isElement(UVLAMP.tex) then return true end
+    UVLAMP.tex = dxCreateTexture("textures/uv_beam.png", "dxt5")
+    if not UVLAMP.tex then
+        outputDebugString("[sDrugRework] UV beam texture load failed: textures/uv_beam.png", 1)
+        return false
+    end
+    return true
+end
+
+local function rotatedOffsetPos(obj, ox, oy, oz)
+    local x, y, z = getElementPosition(obj)
+    local _, _, rz = getElementRotation(obj)
+    local rad = math.rad(rz)
+
+    local rx = ox * math.cos(rad) - oy * math.sin(rad)
+    local ry = ox * math.sin(rad) + oy * math.cos(rad)
+
+    return x + rx, y + ry, z + oz
+end
+
+addEventHandler("onClientPreRender", root, function()
+    if not ensureUvTex() then return end
+
+    local px, py, pz = getElementPosition(localPlayer)
+
+    for benchId, isOn in pairs(UVLAMP.enabledByBench) do
+        if isOn then
+            local entry = placedById and placedById[benchId]
+            if entry and isElement(entry.obj) then
+
+                local bx, by, bz = getElementPosition(entry.obj)
+                if getDistanceBetweenPoints3D(px, py, pz, bx, by, bz) <= 25 then
+
+                    -- UV cone beam (fake volumetric with multiple rays)
+                    local sx, sy, sz = rotatedOffsetPos(entry.obj, UVLAMP.startOff.x, UVLAMP.startOff.y, UVLAMP.startOff.z)
+                    -- Default direction = straight down in LOCAL space
+                    local lx, ly, lz = 0, 0, -1
+
+                    -- Rotate in LOCAL space by pitch/roll/yaw
+                    lx, ly, lz = rotateVecLocal(lx, ly, lz, UVLAMP.pitch or 0, UVLAMP.roll or 0, UVLAMP.yaw or 0)
+
+                    -- Convert to WORLD direction aligned with the BENCH rotation
+                    local dx, dy, dz = localDirToWorld(entry.obj, lx, ly, lz)
+
+                    -- End point
+                    local len = UVLAMP.length or 1.2
+                    local ex, ey, ez = sx + dx * len, sy + dy * len, sz + dz * len
+
+                    -- pulse
+                    local t = getTickCount() * 0.004
+                    local pulse = 0.5 + (math.sin(t) * 0.08)
+
+                    -- 1) outer soft cone
+                    dxDrawMaterialLine3D(
+                        sx, sy, sz, ex, ey, ez,
+                        UVLAMP.tex,
+                        (UVLAMP.outerW + pulse),
+                        tocolor(160, 70, 255, 0)
+                    )
+
+                    -- 2) inner bright core
+                    dxDrawMaterialLine3D(
+                        sx, sy, sz, ex, ey, ez,
+                        UVLAMP.tex,
+                        (UVLAMP.innerW + pulse * 0.5),
+                        tocolor(190, 110, 255, 110)
+                    )
+
+                    -- 3) extra rays around the axis (gives 3D volume illusion)
+                    local rays = UVLAMP.rayCount or 8
+                    local radius = UVLAMP.rayRadius or 0.06
+                    local rayW = UVLAMP.rayWidth or 0.18
+                    local rayA = UVLAMP.rayAlpha or 35
+
+                    -- slight animated rotation so it "shimmers"
+                    local rot = getTickCount() * 0.0015
+
+                    for i = 1, rays do
+                        local ang = rot + (i / rays) * (math.pi * 2)
+                        local ox = math.cos(ang) * radius
+                        local oy = math.sin(ang) * radius
+
+                        -- rotate offset with the bench rotation
+                        local rx, ry = rotateOffsetByObj(entry.obj, ox, oy)
+
+                        dxDrawMaterialLine3D(
+                            sx + rx, sy + ry, sz,
+                            ex + rx, ey + ry, ez,
+                            UVLAMP.tex,
+                            rayW,
+                            tocolor(170, 90, 255, rayA)
+                        )
+                    end
+                end
+            end
+        end
+    end
+end)
+
+addEventHandler("onClientResourceStop", resourceRoot, function()
+    if isElement(UVLAMP.tex) then destroyElement(UVLAMP.tex) end
+    UVLAMP.tex = false
+    UVLAMP.enabledByBench = {}
+end)
+
+
 
 addEvent("sDrugRework:removePlacedWorkbench", true)
 addEventHandler("sDrugRework:removePlacedWorkbench", resourceRoot, function(id)
@@ -2486,4 +2860,42 @@ addEventHandler("sDrugRework:removePlacedWorkbench", resourceRoot, function(id)
     end
 
     removePlacedWorkbenchById(id)
+end)
+
+addCommandHandler("uvbeamoffset", function(_, x, y, z)
+    x, y, z = tonumber(x), tonumber(y), tonumber(z)
+    if not x or not y or not z then
+        outputChatBox("Usage: /uvbeamoffset x y z", 255, 200, 100)
+        return
+    end
+
+    UVLAMP.startOff.x = x
+    UVLAMP.startOff.y = y
+    UVLAMP.startOff.z = z
+
+    UVLAMP.endOff.x = x
+    UVLAMP.endOff.y = y
+    UVLAMP.endOff.z = z - 0.5  -- keeps beam pointing downward
+
+    outputChatBox(("UV offset set to: %.2f %.2f %.2f"):format(x,y,z), 120,200,255)
+end)
+
+addCommandHandler("uvbeamrot", function(_, pitch, yaw, roll)
+    pitch, yaw, roll = tonumber(pitch), tonumber(yaw), tonumber(roll)
+    if pitch == nil or yaw == nil or roll == nil then
+        outputChatBox("Usage: /uvbeamrot <pitchX> <yawZ> <rollY>", 255, 200, 100)
+        return
+    end
+    UVLAMP.pitch, UVLAMP.yaw, UVLAMP.roll = pitch, yaw, roll
+    outputChatBox(("[UV] rot set: pitch=%.1f yaw=%.1f roll=%.1f"):format(pitch, yaw, roll), 120, 200, 255)
+end)
+
+addCommandHandler("uvbeamlen", function(_, len)
+    len = tonumber(len)
+    if not len then
+        outputChatBox("Usage: /uvbeamlen <length>", 255, 200, 100)
+        return
+    end
+    UVLAMP.length = len
+    outputChatBox(("[UV] length set: %.2f"):format(len), 120, 200, 255)
 end)
