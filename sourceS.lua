@@ -63,7 +63,7 @@ addEventHandler("onResourceStart", resourceRoot, function()
                     st.endAt = 0
                     -- convert all base slots to output
                     for _, idx in ipairs({1,2,4,5}) do
-                        if tonumber(st.slots[idx]) == DRY_CFG.BASE_IN then
+                        if isInList(tonumber(st.slots[idx]), DRY_CFG.BASE_IN) then
                             st.slots[idx] = DRY_CFG.BASE_OUT
                         end
                     end
