@@ -2129,7 +2129,7 @@ end)
 -- =========================================================
 
 local DRY_CFG = {
-    BASE_IN = 793,
+    BASE_IN = {793, 451},
     ACETONE = 794,
 }
 
@@ -2158,9 +2158,7 @@ local dryUI = {
 local DRY_COMPAT = {
     baseSlots = {
         { id = 793, name = "Kokain bázis" },
-        -- future examples:
-        -- { id = 120, name = "Metamfetamin bázis" },
-        -- { id = 121, name = "Heroin bázis" },
+        { id = 451, name = "??? (451)" }, -- TODO: rename to the real item name
     },
 
     midSlots = {
@@ -2170,6 +2168,41 @@ local DRY_COMPAT = {
         -- { id = 131, name = "Etanol" },
     }
 }
+
+local function isInList(val, list)
+    if type(list) ~= "table" then return val == list end
+    for i = 1, #list do
+        if list[i] == val then return true end
+    end
+    return false
+end
+
+-- mirror your planned server rules (for UI enable/disable only)
+local DRY_REQUIRE_ACETONE = {
+    [793] = true,
+}
+
+local DRY_REQUIRE_UV = {
+    [451] = true,
+}
+
+local function dry_getBaseIdFromSlots(slots)
+    local baseId = nil
+    for _, idx in ipairs({1,2,4,5}) do
+        local it = tonumber(slots[idx])
+        if it then
+            if not isInList(it, DRY_CFG.BASE_IN) then
+                return false -- invalid base present
+            end
+            baseId = baseId or it
+            if baseId ~= it then
+                return "mixed" -- mixed base types
+            end
+        end
+    end
+    return baseId -- false/nil if none
+end
+
 
 local function dry_getCompatList(slotIndex)
     if slotIndex == 3 then
@@ -2281,14 +2314,35 @@ local function dry_refresh()
     -- start enabled?
     if dry_isValid(dryUI.startBtn) and exports.sGui.setGuiDisabled then
         local canStart = false
-        if not dryUI.active and tonumber(dryUI.slots[3]) == DRY_CFG.ACETONE then
-            for _, idx in ipairs({1,2,4,5}) do
-                if tonumber(dryUI.slots[idx]) == DRY_CFG.BASE_IN then
+
+        if not dryUI.active then
+            local baseId = dry_getBaseIdFromSlots(dryUI.slots)
+
+            if baseId == "mixed" then
+                canStart = false
+            elseif baseId == false then
+                canStart = false
+            elseif baseId then
+                -- UV requirement (client knows UV state via UVLAMP.enabledByBench)
+                if DRY_REQUIRE_UV[baseId] then
+                    if not (UVLAMP and UVLAMP.enabledByBench and UVLAMP.enabledByBench[dryUI.benchId]) then
+                        canStart = false
+                    else
+                        canStart = true
+                    end
+                else
                     canStart = true
-                    break
+                end
+
+                -- acetone requirement
+                if canStart and DRY_REQUIRE_ACETONE[baseId] then
+                    if tonumber(dryUI.slots[3]) ~= DRY_CFG.ACETONE then
+                        canStart = false
+                    end
                 end
             end
         end
+
         sg_setDisabled(dryUI.startBtn, not canStart)
     end
 end
@@ -2460,7 +2514,6 @@ addEventHandler("onClientClick", root, function(btn, st)
     -- start
     if hoverEl == dryUI.startBtn then
         triggerServerEvent("sDrugRework:dryStart", resourceRoot, dryUI.benchId)
-        dry_close() -- close immediately after clicking start
         return
     end
 end)
