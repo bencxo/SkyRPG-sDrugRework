@@ -4,6 +4,10 @@
 local connection = exports.sConnection:getConnection()
 local loadedBenches = {} -- [id] = row
 local dryRacks = {} -- [benchId] = { slots=table, active=bool, startedAt=int, endAt=int, durationSec=int }
+-- =========================================================
+-- UV Lamp (server) - per bench toggle
+-- =========================================================
+local uvLamps = {} -- [benchId] = true/false
 
 local function sendAllBenchesToPlayer(player)
     for _, row in pairs(loadedBenches) do
@@ -86,6 +90,9 @@ addEventHandler("sDrugRework:clientReady", resourceRoot, function()
         if st.active and st.endAt and st.endAt > 0 then
             triggerClientEvent(client, "sDrugRework:dryTimerUpdate", resourceRoot, benchId, st.endAt)
         end
+    end
+    for benchId, st in pairs(uvLamps) do
+        triggerClientEvent(client, "sDrugRework:setUvLampState", resourceRoot, benchId, st)
     end
 end)
 
@@ -901,4 +908,20 @@ addEventHandler("sDrugRework:dryStart", resourceRoot, function(benchId)
     exports.sGui:showInfobox(player, "s", "Szárítás elindítva!")
     triggerClientEvent(root, "sDrugRework:dryTimerUpdate", resourceRoot, benchId, st.endAt)
     triggerClientEvent(player, "sDrugRework:dryReceiveState", resourceRoot, benchId, st.slots, st.active, st.endAt, st.durationSec)
+end)
+
+addEvent("sDrugRework:toggleUvLamp", true)
+addEventHandler("sDrugRework:toggleUvLamp", resourceRoot, function(benchId)
+    local player = client
+    benchId = tonumber(benchId)
+    if not isElement(player) or not benchId or not loadedBenches[benchId] then return end
+
+    local benchRow = loadedBenches[benchId]
+    if not isPlayerNearBench(player, benchRow) then
+        exports.sGui:showInfobox(player, "e", "Túl messze vagy az asztaltól!")
+        return
+    end
+
+    uvLamps[benchId] = not uvLamps[benchId]
+    triggerClientEvent(root, "sDrugRework:setUvLampState", resourceRoot, benchId, uvLamps[benchId])
 end)
