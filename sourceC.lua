@@ -22,7 +22,7 @@ local MORTAR_INPUT_ITEMS = {
 
 -- input itemId -> output itemId (+ optional ratio)
 local MORTAR_RECIPES = {
-    [14]  = { out = 182, ratio = 1, name = "Kokain paszta" },
+    [14]  = { out = 791, ratio = 1, name = "Kokain paszta" },
     [15]  = { out = 183, ratio = 1, name = "Mák cuccos" },
     [432] = { out = 184, ratio = 1, name = "Parazen next" },
 }
@@ -836,14 +836,14 @@ end)
 -- =========================================================
 
 -- CONFIG: set these item IDs (must match server)
-local EXTRACT_ITEM_COCA_PASTE    = 182 -- Kokain paszta (mortar output)
+local EXTRACT_ITEM_COCA_PASTE    = 791 -- Kokain paszta (mortar output)
 local EXTRACT_ITEM_LIGHTER_FLUID = 23   -- TODO
 -- REQUIRED CONFIG (these must match server)
-local EXTRACT_ITEM_COLD_MIX = EXTRACT_ITEM_COLD_MIX or 17      -- you already have this set somewhere
-local EXTRACT_ITEM_STAGE2_ITEM17 = 17
+local EXTRACT_ITEM_COLD_MIX = EXTRACT_ITEM_COLD_MIX or 792      -- you already have this set somewhere
+local EXTRACT_ITEM_STAGE2_ITEM17 = 792
 local EXTRACT_ITEM_BAKING_SODA = 26
-local EXTRACT_ITEM_HEATED_ALKALOID = 50 -- TODO: set your "Hevített Alkaloidkeverék" item ID
-local EXTRACT_ITEM_WET_BASE        = 51  -- output (Tiszta Kokain Bázis (Nedves))
+local EXTRACT_ITEM_HEATED_ALKALOID = 795 -- TODO: set your "Hevített Alkaloidkeverék" item ID
+local EXTRACT_ITEM_WET_BASE        = 793  -- output (Tiszta Kokain Bázis (Nedves))
 
 local function extract_itemPicPath(itemId)
     if not exports.sItems or not exports.sItems.getItemPic then return false end
@@ -1942,7 +1942,19 @@ addEventHandler("onClientClick", root, function(button, state)
         return
 
     elseif arg == "dry" then
-        exports.sGui:showInfobox("i", "Dry clicked (UI later).")
+        if not currentIconBench or not isElement(currentIconBench) then
+            exports.sGui:showInfobox("e", "Nincs asztal a közelben!")
+            return
+        end
+
+        local benchId = tonumber(getElementData(currentIconBench, "drugworkbench.id"))
+        if not benchId then
+            exports.sGui:showInfobox("e", "Hibás asztal azonosító!")
+            return
+        end
+
+        dry_open(benchId)
+        return
 
     elseif arg == "pickup" then
         if not currentIconBench or not isElement(currentIconBench) then
@@ -1957,6 +1969,406 @@ addEventHandler("onClientClick", root, function(button, state)
         end
 
         triggerServerEvent("sDrugRework:pickupWorkbench", resourceRoot, benchId)
+    end
+end)
+
+-- =========================================================
+-- Drying Rack (client UI + timer display)
+-- depends on: placedById[benchId] = {obj=element,...}
+-- =========================================================
+
+local DRY_CFG = {
+    BASE_IN = 793,
+    ACETONE = 794,
+}
+
+local dryUI = {
+    open = false,
+    benchId = false,
+    window = false,
+    slots = { [1]=false,[2]=false,[3]=false,[4]=false,[5]=false },
+    active = false,
+    endAt = 0,
+    durationSec = 10,
+
+    slotBg = {},
+    slotIcon = {},
+    plusBtn = {},
+    takeBtn = {},
+    startBtn = false,
+    infoLbl = false,
+
+    menu = false,
+    menuBtn = false,
+    menuSlot = false,
+    menuBtnItem = {}, -- [btnId] = itemId
+}
+
+local DRY_COMPAT = {
+    baseSlots = {
+        { id = 793, name = "Kokain bázis" },
+        -- future examples:
+        -- { id = 120, name = "Metamfetamin bázis" },
+        -- { id = 121, name = "Heroin bázis" },
+    },
+
+    midSlots = {
+        { id = 794, name = "Aceton" },
+        -- future examples:
+        -- { id = 130, name = "Izopropil alkohol" },
+        -- { id = 131, name = "Etanol" },
+    }
+}
+
+local function dry_getCompatList(slotIndex)
+    if slotIndex == 3 then
+        return DRY_COMPAT.midSlots
+    end
+    return DRY_COMPAT.baseSlots
+end
+
+local dryTimers = {} -- [benchId] = endAtUnix
+
+local function sg_setVisible(el, visible, childrenToo)
+    if el and exports.sGui:isGuiElementValid(el) then
+        exports.sGui:setGuiRenderDisabled(el, not visible, childrenToo or false)
+    end
+end
+
+local function sg_setDisabled(el, disabled)
+    if el and exports.sGui:isGuiElementValid(el) then
+        exports.sGui:setElementDisabled(el, disabled and true or false)
+    end
+end
+
+local function dry_isValid(el)
+    return tonumber(el) and exports.sGui:isGuiElementValid(el)
+end
+
+local function dry_close()
+    if dryUI.menu and dry_isValid(dryUI.menu) then exports.sGui:deleteGuiElement(dryUI.menu) end
+    if dryUI.menuBtn and dry_isValid(dryUI.menuBtn) then exports.sGui:deleteGuiElement(dryUI.menuBtn) end
+    dryUI.menu, dryUI.menuBtn, dryUI.menuSlot = false, false, false
+
+    if dryUI.window and dry_isValid(dryUI.window) then
+        exports.sGui:deleteGuiElement(dryUI.window)
+    end
+
+    dryUI.open = false
+    dryUI.benchId = false
+    dryUI.window = false
+    dryUI.startBtn = false
+    dryUI.infoLbl = false
+
+    for i=1,5 do
+        dryUI.slotBg[i] = false
+        dryUI.slotIcon[i] = false
+        dryUI.plusBtn[i] = false
+        dryUI.takeBtn[i] = false
+    end
+end
+
+local function dry_itemPic(itemId)
+    if not exports.sItems or not exports.sItems.getItemPic then return false end
+    local rel = exports.sItems:getItemPic(tonumber(itemId))
+    if not rel or rel == "" then return false end
+    if rel:sub(1,1) == ":" then return rel end
+    return ":sItems/" .. rel
+end
+
+local function dry_slotWant(slotIndex)
+    return (slotIndex == 3) and DRY_CFG.ACETONE or DRY_CFG.BASE_IN
+end
+
+local function dry_refresh()
+    if not dry_isValid(dryUI.window) then return end
+
+    -- info
+    if dry_isValid(dryUI.infoLbl) then
+        if dryUI.active and (dryUI.endAt or 0) > 0 then
+        local now = getRealTime().timestamp
+        local left = math.max(0, (dryUI.endAt or 0) - now)
+
+        local mm = math.floor(left / 60)
+        local ss = left % 60
+
+        exports.sGui:setLabelText(dryUI.infoLbl, string.format("Folyamatban... (%d:%02d)", mm, ss))
+        elseif dryUI.active then
+            exports.sGui:setLabelText(dryUI.infoLbl, "Folyamatban...")
+        else
+            exports.sGui:setLabelText(dryUI.infoLbl, "Készítsd elő a szárítást.")
+        end
+    end
+
+    -- slots
+    for i=1,5 do
+        local itemId = tonumber(dryUI.slots[i]) or false
+
+        if dry_isValid(dryUI.plusBtn[i]) then
+            sg_setVisible(dryUI.plusBtn[i], (not dryUI.active) and (not itemId))
+        end
+        if dry_isValid(dryUI.takeBtn[i]) then
+            sg_setVisible(dryUI.takeBtn[i], (not dryUI.active) and (itemId ~= false))
+        end
+
+        if itemId then
+            local pic = dry_itemPic(itemId)
+            if pic then
+                if not dry_isValid(dryUI.slotIcon[i]) then
+                    local x,y = exports.sGui:getGuiPosition(dryUI.slotBg[i])
+                    local w,h = exports.sGui:getGuiSize(dryUI.slotBg[i])
+                    dryUI.slotIcon[i] = exports.sGui:createGuiElement("image", x+4, y+4, w-8, h-8, dryUI.window)
+                end
+                exports.sGui:setImageFile(dryUI.slotIcon[i], pic)
+            end
+        else
+            if dry_isValid(dryUI.slotIcon[i]) then exports.sGui:deleteGuiElement(dryUI.slotIcon[i]) end
+            dryUI.slotIcon[i] = false
+        end
+    end
+
+    -- start enabled?
+    if dry_isValid(dryUI.startBtn) and exports.sGui.setGuiDisabled then
+        local canStart = false
+        if not dryUI.active and tonumber(dryUI.slots[3]) == DRY_CFG.ACETONE then
+            for _, idx in ipairs({1,2,4,5}) do
+                if tonumber(dryUI.slots[idx]) == DRY_CFG.BASE_IN then
+                    canStart = true
+                    break
+                end
+            end
+        end
+        sg_setDisabled(dryUI.startBtn, not canStart)
+    end
+end
+
+local function dry_openMenu(slotIndex)
+    if dryUI.active then return end
+
+    -- destroy old menu
+    if dryUI.menu and dry_isValid(dryUI.menu) then exports.sGui:deleteGuiElement(dryUI.menu) end
+    if dryUI.menuBtns then
+        for _, b in ipairs(dryUI.menuBtns) do
+            if dry_isValid(b) then exports.sGui:deleteGuiElement(b) end
+        end
+    end
+    dryUI.menu, dryUI.menuBtns, dryUI.menuSlot = false, {}, slotIndex
+
+    local list = dry_getCompatList(slotIndex) or {}
+    if #list <= 0 then
+        exports.sGui:showInfobox("e", "Nincs kompatibilis item beállítva ehhez a slothoz!")
+        return
+    end
+
+    local bx, by = exports.sGui:getGuiPosition(dryUI.plusBtn[slotIndex])
+
+    local rowH = 30
+    local pad = 6
+    local mw = 260
+    local mh = pad*2 + (#list * rowH)
+
+    dryUI.menu = exports.sGui:createGuiElement("rectangle", bx + 28, by, mw, mh, dryUI.window)
+    exports.sGui:setGuiBackground(dryUI.menu, "solid", "sightgrey3")
+    exports.sGui:setGuiBackgroundBorder(dryUI.menu, 2, "sightmidgrey")
+
+    for i=1, #list do
+        local data = list[i]
+        local itemId = tonumber(data.id)
+        local name = tostring(data.name or ("Item #" .. tostring(itemId)))
+
+        local btnY = by + pad + (i-1)*rowH
+        local btn = exports.sGui:createGuiElement("button", bx + 30, btnY, mw - 4, rowH - 2, dryUI.window)
+        exports.sGui:setButtonText(btn, name)
+        exports.sGui:setGuiBackground(btn, "solid", "sightgrey2")
+        exports.sGui:setGuiHover(btn, "solid", "sightgrey1")
+        exports.sGui:guiSetTooltip(btn, "Berakás")
+
+        dryUI.menuBtnItem[btn] = itemId
+        table.insert(dryUI.menuBtns, btn)
+    end
+end
+
+function dry_open(benchId)
+    benchId = tonumber(benchId)
+    if not benchId then return end
+    if dryUI.open then return end
+
+    dryUI.open = true
+    dryUI.benchId = benchId
+
+    local sx, sy = guiGetScreenSize()
+    local w, h = 520, 360
+    local x, y = math.floor((sx - w) / 2), math.floor((sy - h) / 2)
+
+    dryUI.window = exports.sGui:createGuiElement("window", x, y, w, h)
+    exports.sGui:setWindowTitle(dryUI.window, "18/BebasNeueRegular.otf", "Szárítás")
+    exports.sGui:setWindowCloseButton(dryUI.window, "sDrugRework:dryClose", "times", "sightred")
+
+    dryUI.infoLbl = exports.sGui:createGuiElement("label", 18, 50, w-36, 24, dryUI.window)
+    exports.sGui:setLabelAlignment(dryUI.infoLbl, "center", "center")
+    exports.sGui:setLabelText(dryUI.infoLbl, "Betöltés...")
+
+    local slotW, slotH = 48, 48
+    local cx = w/2
+    local topY = 90
+    local midY = 90 + slotH + 34
+    local botY = midY + slotH + 34
+
+    local pos = {
+        [1] = { cx - slotW - 110, topY },
+        [2] = { cx + 110,        topY },
+        [3] = { cx - slotW/2,    midY },
+        [4] = { cx - slotW - 110, botY },
+        [5] = { cx + 110,         botY },
+    }
+
+    for i=1,5 do
+        local px, py = pos[i][1], pos[i][2]
+
+        dryUI.slotBg[i] = exports.sGui:createGuiElement("rectangle", px, py, slotW, slotH, dryUI.window)
+        exports.sGui:setGuiBackground(dryUI.slotBg[i], "solid", "sightgrey3")
+        exports.sGui:setGuiBackgroundBorder(dryUI.slotBg[i], 2, "sightmidgrey")
+
+        dryUI.plusBtn[i] = exports.sGui:createGuiElement("button", px + slotW + 8, py + 2, 26, 26, dryUI.window)
+        exports.sGui:setButtonText(dryUI.plusBtn[i], "+")
+        exports.sGui:setGuiBackground(dryUI.plusBtn[i], "solid", "sightgrey2")
+        exports.sGui:setGuiHover(dryUI.plusBtn[i], "solid", "sightgrey1")
+        exports.sGui:guiSetTooltip(dryUI.plusBtn[i], "Berakás")
+
+        dryUI.takeBtn[i] = exports.sGui:createGuiElement("button", px, py + slotH + 6, slotW, 26, dryUI.window)
+        exports.sGui:setButtonText(dryUI.takeBtn[i], "Kivétel")
+        exports.sGui:setGuiBackground(dryUI.takeBtn[i], "solid", "sightgrey2")
+        exports.sGui:setGuiHover(dryUI.takeBtn[i], "solid", "sightgrey1")
+        sg_setVisible(dryUI.takeBtn[i], false)
+    end
+
+    dryUI.startBtn = exports.sGui:createGuiElement("button", w/2 - 110, h - 64, 220, 38, dryUI.window)
+    exports.sGui:setButtonText(dryUI.startBtn, "Szárítás")
+    exports.sGui:setGuiBackground(dryUI.startBtn, "solid", "sightgrey2")
+    exports.sGui:setGuiHover(dryUI.startBtn, "solid", "sightgrey1")
+
+    -- request server state
+    triggerServerEvent("sDrugRework:dryRequestState", resourceRoot, benchId)
+end
+
+addEvent("sDrugRework:dryClose", true)
+addEventHandler("sDrugRework:dryClose", root, function()
+    dry_close()
+end)
+
+-- One shared click handler (don’t add new handlers each time you open)
+addEventHandler("onClientClick", root, function(btn, st)
+    if btn ~= "left" or st ~= "up" then return end
+    if not dryUI.open or not dry_isValid(dryUI.window) then return end
+    if not isCursorShowing() then return end
+
+    local hoverEl = exports.sGui:getGuiHoverElement()
+
+    -- menu buttons (multiple)
+    if dryUI.menuBtns and #dryUI.menuBtns > 0 then
+        for _, b in ipairs(dryUI.menuBtns) do
+            if hoverEl == b then
+                local itemId = tonumber(dryUI.menuBtnItem and dryUI.menuBtnItem[b])
+                local slotIndex = tonumber(dryUI.menuSlot)
+
+                if slotIndex and itemId then
+                    triggerServerEvent("sDrugRework:dryPutItem", resourceRoot, dryUI.benchId, slotIndex, itemId)
+                end
+
+                -- close menu after choosing
+                if dryUI.menu and dry_isValid(dryUI.menu) then
+                    exports.sGui:deleteGuiElement(dryUI.menu)
+                end
+
+                for _, bb in ipairs(dryUI.menuBtns) do
+                    if dry_isValid(bb) then
+                        exports.sGui:deleteGuiElement(bb)
+                    end
+                end
+
+                dryUI.menu = false
+                dryUI.menuBtns = {}
+                dryUI.menuSlot = false
+                dryUI.menuBtnItem = {} -- IMPORTANT: clear mapping
+                return
+            end
+        end
+    end
+
+    -- plus/take
+    for i=1,5 do
+        if hoverEl == dryUI.plusBtn[i] then
+            dry_openMenu(i)
+            return
+        elseif hoverEl == dryUI.takeBtn[i] then
+            triggerServerEvent("sDrugRework:dryTakeItem", resourceRoot, dryUI.benchId, i)
+            return
+        end
+    end
+
+    -- start
+    if hoverEl == dryUI.startBtn then
+        triggerServerEvent("sDrugRework:dryStart", resourceRoot, dryUI.benchId)
+        dry_close() -- close immediately after clicking start
+        return
+    end
+end)
+
+addEvent("sDrugRework:dryReceiveState", true)
+addEventHandler("sDrugRework:dryReceiveState", resourceRoot, function(benchId, slots, active, endAt, durationSec)
+    benchId = tonumber(benchId)
+    if not benchId then return end
+    if dryUI.benchId ~= benchId then return end
+
+    dryUI.slots = slots or dryUI.slots
+    dryUI.active = active and true or false
+    dryUI.endAt = tonumber(endAt) or 0
+    dryUI.durationSec = tonumber(durationSec) or dryUI.durationSec
+
+    dry_refresh()
+end)
+
+addEvent("sDrugRework:dryTimerUpdate", true)
+addEventHandler("sDrugRework:dryTimerUpdate", resourceRoot, function(benchId, endAt)
+    benchId = tonumber(benchId)
+    endAt = tonumber(endAt)
+    if benchId and endAt then
+        dryTimers[benchId] = endAt
+    end
+end)
+
+addEvent("sDrugRework:dryTimerClear", true)
+addEventHandler("sDrugRework:dryTimerClear", resourceRoot, function(benchId)
+    benchId = tonumber(benchId)
+    if benchId then
+        dryTimers[benchId] = nil
+    end
+end)
+
+-- 3D timer above bench
+addEventHandler("onClientRender", root, function()
+    local now = getRealTime().timestamp
+
+    for benchId, endAt in pairs(dryTimers) do
+        local entry = placedById and placedById[benchId]
+        if entry and isElement(entry.obj) then
+            local bx, by, bz = getElementPosition(entry.obj)
+
+            local px, py, pz = getElementPosition(localPlayer)
+            if getDistanceBetweenPoints3D(px, py, pz, bx, by, bz) <= 18 then
+                local left = (endAt or 0) - now
+                if left > 0 then
+                    local mins = math.ceil(left / 60)
+                    local sx, sy = getScreenFromWorldPosition(bx, by, bz + 1.05)
+                    if sx and sy then
+                        local mm = math.floor(left / 60)
+                        local ss = left % 60
+                        dxDrawText(string.format("Szárítás: %d:%02d", mm, ss), sx-140, sy-28, sx+140, sy,
+                            tocolor(255,255,255,220), 1, "default-bold", "center", "center")
+                    end
+                end
+            end
+        end
     end
 end)
 

@@ -3,6 +3,7 @@
 
 local connection = exports.sConnection:getConnection()
 local loadedBenches = {} -- [id] = row
+local dryRacks = {} -- [benchId] = { slots=table, active=bool, startedAt=int, endAt=int, durationSec=int }
 
 local function sendAllBenchesToPlayer(player)
     for _, row in pairs(loadedBenches) do
@@ -30,6 +31,49 @@ addEventHandler("onResourceStart", resourceRoot, function()
             end
         end
     end, connection, "SELECT id, benchType, x, y, z, rz, interior, dimension FROM drug_workbenches")
+    local function loadDryRacks()
+        dryRacks = {}
+
+        dbQuery(function(qh)
+            local rows = dbPoll(qh, 0) or {}
+            for i=1,#rows do
+                local r = rows[i]
+                local benchId = tonumber(r.benchId)
+                if benchId then
+                    dryRacks[benchId] = {
+                        slots = decodeSlots(r.slotsJson),
+                        active = tonumber(r.active) == 1,
+                        startedAt = tonumber(r.startedAt) or 0,
+                        endAt = tonumber(r.endAt) or 0,
+                        durationSec = tonumber(r.durationSec) or (DRY_CFG.DURATION_SEC or 600)
+                    }
+                end
+            end
+
+            -- finalize any expired on boot
+            local n = nowUnix()
+            for benchId, st in pairs(dryRacks) do
+                if st.active and st.endAt > 0 and n >= st.endAt then
+                    st.active = false
+                    st.startedAt = 0
+                    st.endAt = 0
+                    -- convert all base slots to output
+                    for _, idx in ipairs({1,2,4,5}) do
+                        if tonumber(st.slots[idx]) == DRY_CFG.BASE_IN then
+                            st.slots[idx] = DRY_CFG.BASE_OUT
+                        end
+                    end
+                    dbExec(connection, "UPDATE drug_drying_racks SET slotsJson=?, active=0, startedAt=0, endAt=0 WHERE benchId=?",
+                        encodeSlots(st.slots), benchId
+                    )
+                end
+            end
+        end, connection, "SELECT * FROM drug_drying_racks")
+    end
+
+    addEventHandler("onResourceStart", resourceRoot, function()
+        loadDryRacks()
+    end)
 end)
 
 addEvent("sDrugRework:clientReady", true)
@@ -37,14 +81,42 @@ addEventHandler("sDrugRework:clientReady", resourceRoot, function()
     local player = client
     if not isElement(player) then return end
     sendAllBenchesToPlayer(player)
+    -- after sending benches
+    for benchId, st in pairs(dryRacks) do
+        if st.active and st.endAt and st.endAt > 0 then
+            triggerClientEvent(client, "sDrugRework:dryTimerUpdate", resourceRoot, benchId, st.endAt)
+        end
+    end
 end)
+
+local function sitems_hasAtLeast(player, itemId, amount)
+    local row = exports.sItems:hasItem(player, itemId) -- IMPORTANT: no amount param
+    if not row then return false end
+    local have = tonumber(row.amount) or 0
+    return have >= (amount or 1)
+end
+
+local function sitems_take(player, itemId, amount)
+    -- Your takeItem uses (dataType, dataValue, amount)
+    exports.sItems:takeItem(player, "itemId", itemId, amount or 1)
+    -- cannot trust return value because it returns true only when stack is deleted
+    return true
+end
+
+local function sitems_give(player, itemId, amount)
+    -- use your server's giveItem export name (most likely giveItem)
+    if exports.sItems.giveItem then
+        return exports.sItems:giveItem(player, itemId, amount or 1)
+    end
+    return false
+end
 
 -- =========================================================
 -- Mortar grind server logic
 -- =========================================================
 
 local MORTAR_RECIPES = {
-    [14]  = { out = 182, ratio = 1 },
+    [14]  = { out = 791, ratio = 1 },
     [15]  = { out = 183, ratio = 1 },
     [432] = { out = 184, ratio = 1 },
 }
@@ -52,6 +124,45 @@ local MORTAR_RECIPES = {
 -- pending crafts (items already taken, waiting for minigame finish/cancel)
 -- pending[player] = { inId=, inQty=, outId=, outQty= }
 local pending = {}
+
+-- =========================================================
+-- Drying rack (persistent) - CONFIG
+-- =========================================================
+local DRY_CFG = {
+    BASE_IN  = 793,   -- coca base
+    ACETONE  = 794,   -- acetone
+    BASE_OUT = 17,  -- TODO: SET THIS to your "dried base" itemId
+    DURATION_SEC = 1 * 10, -- 10 minutes
+    NEAR_DIST = 4.0
+}
+
+local function nowUnix()
+    return getRealTime().timestamp
+end
+
+local function isPlayerNearBench(player, benchRow)
+    if not isElement(player) or not benchRow then return false end
+    local px, py, pz = getElementPosition(player)
+    return getDistanceBetweenPoints3D(px, py, pz, benchRow.x, benchRow.y, benchRow.z) <= (DRY_CFG.NEAR_DIST or 4.0)
+end
+
+local function defaultDrySlots()
+    -- 5 slots: 1,2,3(mid),4,5
+    return { [1]=false, [2]=false, [3]=false, [4]=false, [5]=false }
+end
+
+local function decodeSlots(str)
+    if type(str) ~= "string" or str == "" then return defaultDrySlots() end
+    local ok, t = pcall(fromJSON, str)
+    if not ok or type(t) ~= "table" then return defaultDrySlots() end
+    -- normalize missing keys
+    for i=1,5 do if t[i] == nil then t[i] = false end end
+    return t
+end
+
+local function encodeSlots(t)
+    return toJSON(t or defaultDrySlots(), true) or toJSON(defaultDrySlots(), true)
+end
 
 
 addEvent("sDrugRework:requestPlaceWorkbench", true)
@@ -600,4 +711,194 @@ end)
 
 addEventHandler("onPlayerQuit", root, function()
     pendingSep[source] = nil
+end)
+
+addEvent("sDrugRework:dryRequestState", true)
+addEventHandler("sDrugRework:dryRequestState", resourceRoot, function(benchId)
+    local player = client
+    benchId = tonumber(benchId)
+    if not benchId or not loadedBenches[benchId] then return end
+
+    local benchRow = loadedBenches[benchId]
+    if not isPlayerNearBench(player, benchRow) then
+        exports.sGui:showInfobox(player, "e", "Túl messze vagy az asztaltól!")
+        return
+    end
+
+    local st = dryRacks[benchId]
+    if not st then
+        st = { slots = defaultDrySlots(), active=false, startedAt=0, endAt=0, durationSec = DRY_CFG.DURATION_SEC }
+        dryRacks[benchId] = st
+        dbExec(connection, "INSERT IGNORE INTO drug_drying_racks (benchId, slotsJson, active, startedAt, endAt, durationSec) VALUES (?,?,?,?,?,?)",
+            benchId, encodeSlots(st.slots), 0, 0, 0, st.durationSec
+        )
+    end
+
+    -- if active but expired, finalize on demand too
+    local n = nowUnix()
+    if st.active and st.endAt > 0 and n >= st.endAt then
+        st.active = false
+        st.startedAt = 0
+        st.endAt = 0
+        for _, idx in ipairs({1,2,4,5}) do
+            if tonumber(st.slots[idx]) == DRY_CFG.BASE_IN then
+                st.slots[idx] = DRY_CFG.BASE_OUT
+            end
+        end
+        dbExec(connection, "UPDATE drug_drying_racks SET slotsJson=?, active=0, startedAt=0, endAt=0 WHERE benchId=?",
+            encodeSlots(st.slots), benchId
+        )
+        triggerClientEvent(root, "sDrugRework:dryTimerClear", resourceRoot, benchId)
+    end
+
+    triggerClientEvent(player, "sDrugRework:dryReceiveState", resourceRoot, benchId, st.slots, st.active, st.endAt, st.durationSec)
+end)
+
+addEvent("sDrugRework:dryPutItem", true)
+addEventHandler("sDrugRework:dryPutItem", resourceRoot, function(benchId, slotIndex, itemId)
+    local player = client
+    benchId = tonumber(benchId)
+    slotIndex = tonumber(slotIndex)
+    itemId = tonumber(itemId)
+
+    if not benchId or not loadedBenches[benchId] then return end
+    if not slotIndex or slotIndex < 1 or slotIndex > 5 then return end
+    if not itemId then return end
+
+    local benchRow = loadedBenches[benchId]
+    if not isPlayerNearBench(player, benchRow) then
+        exports.sGui:showInfobox(player, "e", "Túl messze vagy az asztaltól!")
+        return
+    end
+
+    local st = dryRacks[benchId]
+    if not st then
+        st = { slots = defaultDrySlots(), active=false, startedAt=0, endAt=0, durationSec = DRY_CFG.DURATION_SEC }
+        dryRacks[benchId] = st
+        dbExec(connection, "INSERT IGNORE INTO drug_drying_racks (benchId, slotsJson, active, startedAt, endAt, durationSec) VALUES (?,?,?,?,?,?)",
+            benchId, encodeSlots(st.slots), 0, 0, 0, st.durationSec
+        )
+    end
+
+    if st.active then
+        exports.sGui:showInfobox(player, "e", "Szárítás közben nem lehet pakolni!")
+        return
+    end
+
+    if st.slots[slotIndex] then
+        exports.sGui:showInfobox(player, "e", "Ez a slot már foglalt!")
+        return
+    end
+
+    -- compatibility rules
+    local need = false
+    if slotIndex == 3 then need = DRY_CFG.ACETONE else need = DRY_CFG.BASE_IN end
+    if itemId ~= need then
+        exports.sGui:showInfobox(player, "e", "Nem megfelelő item ehhez a slothoz!")
+        return
+    end
+
+    if not sitems_hasAtLeast(player, itemId, 1) then
+        exports.sGui:showInfobox(player, "e", "Nincs nálad elegendő alapanyag!")
+        return
+    end
+
+    sitems_take(player, itemId, 1)
+
+    st.slots[slotIndex] = itemId
+    dbExec(connection, "UPDATE drug_drying_racks SET slotsJson=? WHERE benchId=?", encodeSlots(st.slots), benchId)
+
+    triggerClientEvent(player, "sDrugRework:dryReceiveState", resourceRoot, benchId, st.slots, st.active, st.endAt, st.durationSec)
+end)
+
+addEvent("sDrugRework:dryTakeItem", true)
+addEventHandler("sDrugRework:dryTakeItem", resourceRoot, function(benchId, slotIndex)
+    local player = client
+    benchId = tonumber(benchId)
+    slotIndex = tonumber(slotIndex)
+
+    if not benchId or not loadedBenches[benchId] then return end
+    if not slotIndex or slotIndex < 1 or slotIndex > 5 then return end
+
+    local benchRow = loadedBenches[benchId]
+    if not isPlayerNearBench(player, benchRow) then
+        exports.sGui:showInfobox(player, "e", "Túl messze vagy az asztaltól!")
+        return
+    end
+
+    local st = dryRacks[benchId]
+    if not st then return end
+
+    if st.active then
+        exports.sGui:showInfobox(player, "e", "Szárítás közben nem lehet kivenni!")
+        return
+    end
+
+    local it = tonumber(st.slots[slotIndex])
+    if not it then return end
+
+    if not exports.sItems:hasSpaceForItem(player, it, 1) then
+        exports.sGui:showInfobox(player, "e", "Nincs elég hely az inventoryban!")
+        return
+    end
+
+    st.slots[slotIndex] = false
+    dbExec(connection, "UPDATE drug_drying_racks SET slotsJson=? WHERE benchId=?", encodeSlots(st.slots), benchId)
+
+    sitems_give(player, it, 1)
+    triggerClientEvent(player, "sDrugRework:dryReceiveState", resourceRoot, benchId, st.slots, st.active, st.endAt, st.durationSec)
+end)
+
+addEvent("sDrugRework:dryStart", true)
+addEventHandler("sDrugRework:dryStart", resourceRoot, function(benchId)
+    local player = client
+    benchId = tonumber(benchId)
+    if not benchId or not loadedBenches[benchId] then return end
+
+    local benchRow = loadedBenches[benchId]
+    if not isPlayerNearBench(player, benchRow) then
+        exports.sGui:showInfobox(player, "e", "Túl messze vagy az asztaltól!")
+        return
+    end
+
+    local st = dryRacks[benchId]
+    if not st then return end
+    if st.active then
+        exports.sGui:showInfobox(player, "e", "Már zajlik a szárítás!")
+        return
+    end
+
+    if tonumber(st.slots[3]) ~= DRY_CFG.ACETONE then
+        exports.sGui:showInfobox(player, "e", "Kell aceton a középső slotba!")
+        return
+    end
+
+    local hasBase = false
+    for _, idx in ipairs({1,2,4,5}) do
+        if tonumber(st.slots[idx]) == DRY_CFG.BASE_IN then
+            hasBase = true
+            break
+        end
+    end
+    if not hasBase then
+        exports.sGui:showInfobox(player, "e", "Tegyél be legalább 1 kokain bázist!")
+        return
+    end
+
+    -- consume acetone
+    st.slots[3] = false
+
+    local n = nowUnix()
+    st.active = true
+    st.startedAt = n
+    st.durationSec = DRY_CFG.DURATION_SEC
+    st.endAt = n + st.durationSec
+
+    dbExec(connection, "UPDATE drug_drying_racks SET slotsJson=?, active=1, startedAt=?, endAt=?, durationSec=? WHERE benchId=?",
+        encodeSlots(st.slots), st.startedAt, st.endAt, st.durationSec, benchId
+    )
+
+    exports.sGui:showInfobox(player, "s", "Szárítás elindítva!")
+    triggerClientEvent(root, "sDrugRework:dryTimerUpdate", resourceRoot, benchId, st.endAt)
+    triggerClientEvent(player, "sDrugRework:dryReceiveState", resourceRoot, benchId, st.slots, st.active, st.endAt, st.durationSec)
 end)

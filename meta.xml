@@ -3,5 +3,8 @@
     <script src="sourceS.lua" type="server" />
     <script src="sourceC.lua" type="client" />
     <file src="files/mortarandpestle.mp3" />
+    <file src="files/mixing.mp3" />
+    <file src="files/heating.mp3" />
+    <file src="files/separating.mp3" />
     <download_priority_group>-110</download_priority_group>
 </meta>
