@@ -61,12 +61,30 @@ addEventHandler("onResourceStart", resourceRoot, function()
                     st.active = false
                     st.startedAt = 0
                     st.endAt = 0
-                    -- convert all base slots to output
+                    -- determine baseId (must be consistent because you already prevent mixing on start)
+                    local baseId = false
                     for _, idx in ipairs({1,2,4,5}) do
-                        if isInList(tonumber(st.slots[idx]), DRY_CFG.BASE_IN) then
-                            st.slots[idx] = DRY_CFG.BASE_OUT
+                        local it = tonumber(st.slots[idx])
+                        if it then
+                            baseId = baseId or it
+                            if baseId ~= it then
+                                baseId = "mixed"
+                                break
+                            end
                         end
                     end
+
+                    local outId = (type(baseId) == "number") and DRY_CFG.OUTPUT_BY_BASE[baseId] or false
+
+                    -- apply output mapping if we have one
+                    if outId then
+                        for _, idx in ipairs({1,2,4,5}) do
+                            if isInList(tonumber(st.slots[idx]), DRY_CFG.BASE_IN) then
+                                st.slots[idx] = outId
+                            end
+                        end
+                    end
+
                     dbExec(connection, "UPDATE drug_drying_racks SET slotsJson=?, active=0, startedAt=0, endAt=0 WHERE benchId=?",
                         encodeSlots(st.slots), benchId
                     )
@@ -138,10 +156,19 @@ local pending = {}
 local DRY_CFG = {
     BASE_IN  = {793, 451},   -- coca base (accepted ids)
     ACETONE  = 794,          -- acetone
-    BASE_OUT = 17,           -- TODO: dried base output
+    OUTPUT_BY_BASE = {
+        [793] = 17,
+        [451] = 18,
+    },
     DURATION_SEC = 1 * 10,   -- 10 minutes (your comment says minutes but value is 10 sec right now)
     NEAR_DIST = 4.0
 }
+
+-- after DRY_CFG definition:
+DRY_CFG.BASE_IN = {}
+for k in pairs(DRY_CFG.OUTPUT_BY_BASE) do
+    table.insert(DRY_CFG.BASE_IN, k)
+end
 
 local function isInList(val, list)
     if type(list) ~= "table" then
@@ -468,14 +495,14 @@ end)
 -- =========================================================
 
 -- CONFIG: set these item IDs
-local EXTRACT_ITEM_COCA_PASTE   = 182   -- Kokain paszta (your mortar output already uses 182)
+local EXTRACT_ITEM_COCA_PASTE   = 791   -- Kokain paszta (your mortar output already uses 182)
 local EXTRACT_ITEM_LIGHTER_FLUID = 23    -- TODO: set lighter fluid item ID
 -- ===== Stage 2 (Heating) server config =====
-local EXTRACT_ITEM_COLD_MIX         = EXTRACT_ITEM_COLD_MIX or 17     -- your cold mix id
+local EXTRACT_ITEM_COLD_MIX         = 792     -- your cold mix id
 local EXTRACT_ITEM_STAGE2_ITEM17    = 17
 local EXTRACT_ITEM_BAKING_SODA      = 26
-local EXTRACT_ITEM_HEATED_ALKALOID = 50 -- TODO: set your "Hevített Alkaloidkeverék" item ID
-local EXTRACT_ITEM_WET_BASE        = 51  -- output (Tiszta Kokain Bázis (Nedves))
+local EXTRACT_ITEM_HEATED_ALKALOID = 795 -- TODO: set your "Hevített Alkaloidkeverék" item ID
+local EXTRACT_ITEM_WET_BASE        = 793  -- output (Tiszta Kokain Bázis (Nedves))
 
 -- pendingHeat[player] = { outId=, outQty= }
 local pendingHeat = pendingHeat or {}
@@ -527,6 +554,12 @@ local function takeAmountByItemId(player, itemId, qty)
     end
 
     return true
+end
+
+local function sitems_take(player, itemId, amount)
+    amount = tonumber(amount) or 1
+    if amount <= 0 then return true end
+    return takeAmountByItemId(player, itemId, amount)
 end
 
 addEvent("sDrugRework:requestExtractMix", true)
@@ -770,11 +803,30 @@ addEventHandler("sDrugRework:dryRequestState", resourceRoot, function(benchId)
         st.active = false
         st.startedAt = 0
         st.endAt = 0
+        -- determine baseId (must be consistent because you already prevent mixing on start)
+        local baseId = false
         for _, idx in ipairs({1,2,4,5}) do
-            if isInList(tonumber(st.slots[idx]), DRY_CFG.BASE_IN) then
-                st.slots[idx] = DRY_CFG.BASE_OUT
+            local it = tonumber(st.slots[idx])
+            if it then
+                baseId = baseId or it
+                if baseId ~= it then
+                    baseId = "mixed"
+                    break
+                end
             end
         end
+
+        local outId = (type(baseId) == "number") and DRY_CFG.OUTPUT_BY_BASE[baseId] or false
+
+        -- apply output mapping if we have one
+        if outId then
+            for _, idx in ipairs({1,2,4,5}) do
+                if isInList(tonumber(st.slots[idx]), DRY_CFG.BASE_IN) then
+                    st.slots[idx] = outId
+                end
+            end
+        end
+
         dbExec(connection, "UPDATE drug_drying_racks SET slotsJson=?, active=0, startedAt=0, endAt=0 WHERE benchId=?",
             encodeSlots(st.slots), benchId
         )
@@ -925,6 +977,13 @@ addEventHandler("sDrugRework:dryStart", resourceRoot, function(benchId)
         return
     end
 
+    -- ✅ ensure we have configured output for this base (NOW baseId exists)
+    local outId = DRY_CFG.OUTPUT_BY_BASE and DRY_CFG.OUTPUT_BY_BASE[baseId]
+    if not outId then
+        exports.sGui:showInfobox(player, "e", "Nincs beállítva kimeneti item ehhez az alapanyaghoz!")
+        return
+    end
+
     -- UV requirement (only for configured items, e.g. 451)
     if DRY_REQUIRE_UV[baseId] then
         if not uvLamps[benchId] then
@@ -958,6 +1017,7 @@ addEventHandler("sDrugRework:dryStart", resourceRoot, function(benchId)
     triggerClientEvent(player, "sDrugRework:dryReceiveState", resourceRoot, benchId, st.slots, st.active, st.endAt, st.durationSec)
 end)
 
+
 addEvent("sDrugRework:toggleUvLamp", true)
 addEventHandler("sDrugRework:toggleUvLamp", resourceRoot, function(benchId)
     local player = client
@@ -972,4 +1032,13 @@ addEventHandler("sDrugRework:toggleUvLamp", resourceRoot, function(benchId)
 
     uvLamps[benchId] = not uvLamps[benchId]
     triggerClientEvent(root, "sDrugRework:setUvLampState", resourceRoot, benchId, uvLamps[benchId])
+end)
+
+addEvent("sDrugRework:requestUvLampState", true)
+addEventHandler("sDrugRework:requestUvLampState", root, function(benchId)
+    benchId = tonumber(benchId)
+    if not benchId then return end
+
+    local state = uvLamps[benchId] == true
+    triggerClientEvent(client, "sDrugRework:setUvLampState", client, benchId, state)
 end)

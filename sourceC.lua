@@ -9,6 +9,8 @@ local placingData = nil
 local ghostObj = nil
 local ghostRotZ = 0
 
+local UVLAMP -- forward declaration so earlier functions bind to this local
+
 -- =========================================================
 -- Mortar & Pestle UI (BASE) - sGui compatible
 -- =========================================================
@@ -2131,6 +2133,10 @@ end)
 local DRY_CFG = {
     BASE_IN = {793, 451},
     ACETONE = 794,
+    OUTPUT_BY_BASE = {
+        [793] = 17,
+        [451] = 18,
+    },
 }
 
 local dryUI = {
@@ -2270,13 +2276,13 @@ local function dry_refresh()
     -- info
     if dry_isValid(dryUI.infoLbl) then
         if dryUI.active and (dryUI.endAt or 0) > 0 then
-        local now = getRealTime().timestamp
-        local left = math.max(0, (dryUI.endAt or 0) - now)
+            local now = getRealTime().timestamp
+            local left = math.max(0, (dryUI.endAt or 0) - now)
 
-        local mm = math.floor(left / 60)
-        local ss = left % 60
+            local mm = math.floor(left / 60)
+            local ss = left % 60
 
-        exports.sGui:setLabelText(dryUI.infoLbl, string.format("Folyamatban... (%d:%02d)", mm, ss))
+            exports.sGui:setLabelText(dryUI.infoLbl, string.format("Folyamatban... (%d:%02d)", mm, ss))
         elseif dryUI.active then
             exports.sGui:setLabelText(dryUI.infoLbl, "Folyamatban...")
         else
@@ -2323,9 +2329,23 @@ local function dry_refresh()
             elseif baseId == false then
                 canStart = false
             elseif baseId then
-                -- UV requirement (client knows UV state via UVLAMP.enabledByBench)
+
+                local bId = tonumber(dryUI.benchId) -- ✅ IMPORTANT
+                local uv = (UVLAMP and UVLAMP.enabledByBench and UVLAMP.enabledByBench[bId])
+
+                -- DEBUG (only prints when baseId is valid)
+                --outputChatBox(("[DRY DEBUG] benchId=%s (num=%s) baseId=%s requireUV=%s uvState=%s slots3=%s"):format(
+                --    tostring(dryUI.benchId),
+                --    tostring(bId),
+                --    tostring(baseId),
+                --    tostring(DRY_REQUIRE_UV[baseId] and true or false),
+                --    tostring(uv),
+                --    tostring(dryUI.slots[3])
+                --))
+
+                -- UV requirement
                 if DRY_REQUIRE_UV[baseId] then
-                    if not (UVLAMP and UVLAMP.enabledByBench and UVLAMP.enabledByBench[dryUI.benchId]) then
+                    if not (UVLAMP and UVLAMP.enabledByBench and UVLAMP.enabledByBench[bId] == true) then
                         canStart = false
                     else
                         canStart = true
@@ -2343,9 +2363,14 @@ local function dry_refresh()
             end
         end
 
+        -- DEBUG final decision
+        --outputChatBox("[DRY DEBUG] canStart=" .. tostring(canStart))
+
         sg_setDisabled(dryUI.startBtn, not canStart)
     end
 end
+
+
 
 local function dry_openMenu(slotIndex)
     if dryUI.active then return end
@@ -2399,7 +2424,7 @@ function dry_open(benchId)
     if dryUI.open then return end
 
     dryUI.open = true
-    dryUI.benchId = benchId
+    dryUI.benchId = tonumber(benchId)
 
     local sx, sy = guiGetScreenSize()
     local w, h = 520, 360
@@ -2677,7 +2702,7 @@ end, NEAR_SCAN_MS, 0)
 -- =========================================================
 -- UV Lamp (client) - beam render per benchId
 -- =========================================================
-local UVLAMP = {
+UVLAMP = {
     tex = false,
     enabledByBench = {}, -- [benchId] = true/false
 
@@ -2689,6 +2714,8 @@ local UVLAMP = {
     startOff = { x = 0.95, y = 0.00, z = 1.52 }, -- lamp bulb
     endOff   = { x = 0.95, y = 0.00, z = 1.00 }, -- tray / target
 }
+
+triggerServerEvent("sDrugRework:requestUvLampState", localPlayer, tonumber(dryUI.benchId))
 
 UVLAMP.rayCount = 8      -- 4/6/8/12 (8 is a nice sweet spot)
 UVLAMP.rayRadius = 0.06  -- how far rays are offset from center (0.03–0.10)
@@ -2761,20 +2788,32 @@ end
 
 
 
+UVLAMP = UVLAMP or {}
+UVLAMP.enabledByBench = UVLAMP.enabledByBench or {}
+
 addEvent("sDrugRework:setUvLampState", true)
-addEventHandler("sDrugRework:setUvLampState", resourceRoot, function(benchId, state)
+addEventHandler("sDrugRework:setUvLampState", root, function(benchId, state)
+    local rawBenchId = benchId
     benchId = tonumber(benchId)
+    state = (state == true)
+
+    --outputChatBox(("[UV EVENT] rawBenchId=%s numBenchId=%s state=%s"):format(
+    --    tostring(rawBenchId),
+    --    tostring(benchId),
+    --    tostring(state)
+    --))
+
     if not benchId then return end
 
-    state = state and true or false
-
-    -- detect change (so we don't spam sound on initial sync)
     local old = UVLAMP.enabledByBench[benchId]
     UVLAMP.enabledByBench[benchId] = state
 
-    if old == nil or old == state then
-        return
-    end
+    --outputChatBox(("[UV EVENT] stored enabledByBench[%d]=%s (old=%s)"):format(
+    --    benchId,
+    --    tostring(UVLAMP.enabledByBench[benchId]),
+    --    tostring(old)
+    --))
+
 
     -- play 3D sound at bench for nearby players
     local entry = placedById and placedById[benchId]
@@ -2783,11 +2822,12 @@ addEventHandler("sDrugRework:setUvLampState", resourceRoot, function(benchId, st
 
         local snd = playSound3D("files/uvlamp.mp3", x, y, z, false)
         if snd then
-            setSoundMaxDistance(snd, 18)   -- tweak range
-            setSoundVolume(snd, 0.8)       -- tweak loudness
+            setSoundMaxDistance(snd, 18)
+            setSoundVolume(snd, 0.8)
         end
     end
 end)
+
 
 
 local function ensureUvTex()

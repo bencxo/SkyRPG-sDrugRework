@@ -2,6 +2,10 @@ workbenchDefs = {
     ["chem_table_v1"] = {
         modelName = "chem_table_v1",
         itemId = 758, -- <-- IMPORTANT: what item you get back on pickup
+    },
+    ["packaging_table"] = {
+        modelName = "packaging_table",
+        itemId = 796, -- <-- IMPORTANT: what item you get back on pickup
     }
 }
 
